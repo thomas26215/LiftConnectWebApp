@@ -43,24 +43,35 @@
       <RouterLink to="/entrainements" class="btn-new">
         <span>+</span> Nouvel entraînement
       </RouterLink>
-      <div class="user-card">
-        <div class="avatar">TV</div>
+      <RouterLink to="/profil" class="user-card" title="Voir mon profil">
+        <div class="avatar">{{ authStore.initials }}</div>
         <div class="user-info">
-          <div class="user-name">Thomas Venouil</div>
-          <div class="user-handle">@thomas.v123456</div>
+          <div class="user-name">{{ authStore.displayName }}</div>
+          <div class="user-handle">{{ authStore.user?.email }}</div>
         </div>
-      </div>
+        <button class="logout-icon" type="button" @click.prevent.stop="handleLogout" aria-label="Se déconnecter">↩</button>
+      </RouterLink>
     </div>
   </aside>
 </template>
 
 <script setup>
+import { useRouter } from 'vue-router'
+import { useAuthStore } from '@/stores/auth'
 import IconDashboard from '@/components/ui/icons/IconDashboard.vue'
 import IconCalendar  from '@/components/ui/icons/IconCalendar.vue'
 import IconClipboard from '@/components/ui/icons/IconClipboard.vue'
 import IconChart     from '@/components/ui/icons/IconChart.vue'
 import IconChat      from '@/components/ui/icons/IconChat.vue'
 import IconUsers     from '@/components/ui/icons/IconUsers.vue'
+
+const authStore = useAuthStore()
+const router    = useRouter()
+
+async function handleLogout() {
+  await authStore.logout()
+  router.push('/login')
+}
 </script>
 
 <style scoped>
@@ -186,6 +197,7 @@ import IconUsers     from '@/components/ui/icons/IconUsers.vue'
   border-radius: var(--r-sm);
   cursor: pointer;
   transition: background var(--transition);
+  text-decoration: none;
 }
 .user-card:hover { background: var(--secondary-faint); }
 .avatar {
@@ -208,4 +220,13 @@ import IconUsers     from '@/components/ui/icons/IconUsers.vue'
   font-size: 0.67rem; color: var(--text-3);
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
+.logout-icon {
+  border: none;
+  background: transparent;
+  font-size: 0.8rem;
+  color: var(--text-3);
+  transition: color var(--transition);
+  cursor: pointer;
+}
+.user-card:hover .logout-icon { color: #f87171; }
 </style>
