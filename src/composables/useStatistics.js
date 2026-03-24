@@ -1,8 +1,30 @@
 import { computed, ref } from 'vue'
-import { collection, getDocs } from 'firebase/firestore'
+import { addDoc, collection, deleteDoc, doc, getDocs, query, limit, updateDoc } from 'firebase/firestore'
 import { db } from '@/firebase'
 
 const DISTRIBUTION_COLORS = ['#f97316', '#60a5fa', '#a78bfa', '#34d399', '#fbbf24', '#fb7185']
+const CACHE_TTL_MS = 5 * 60 * 1000
+
+function buildCacheKey(uid, sessionLimit, includeMetrics) {
+  return `liftconnect_stats_cache_${uid}_${sessionLimit}_${includeMetrics ? 'full' : 'light'}`
+}
+
+function serializeSessions(sessions) {
+  return sessions.map(session => ({
+    ...session,
+    startedAt: session.startedAt ? session.startedAt.toISOString() : null,
+    endedAt: session.endedAt ? session.endedAt.toISOString() : null,
+  }))
+}
+
+function deserializeSessions(sessions) {
+  return (sessions || []).map(session => ({
+    ...session,
+    startedAt: toDate(session.startedAt),
+    endedAt: toDate(session.endedAt),
+    metrics: Array.isArray(session.metrics) ? session.metrics : [],
+  }))
+}
 
 function toDate(value) {
   if (!value) return null
@@ -72,10 +94,32 @@ export function useStatistics() {
   const loading = ref(false)
   const error = ref(null)
 
-  async function fetchUserStatistics(uid) {
+  async function fetchUserStatistics(uid, options = {}) {
+    const {
+      sessionLimit = 30,
+      includeMetrics = false,
+      forceRefresh = false,
+    } = options
+
     if (!uid) {
       rawSessions.value = []
       return []
+    }
+
+    const cacheKey = buildCacheKey(uid, sessionLimit, includeMetrics)
+    if (!forceRefresh) {
+      try {
+        const cachedRaw = localStorage.getItem(cacheKey)
+        if (cachedRaw) {
+          const cached = JSON.parse(cachedRaw)
+          if (cached?.createdAt && Date.now() - cached.createdAt < CACHE_TTL_MS) {
+            const restored = deserializeSessions(cached.sessions)
+            rawSessions.value = restored
+            return restored
+          }
+        }
+      } catch {
+      }
     }
 
     loading.value = true
@@ -83,7 +127,7 @@ export function useStatistics() {
 
     try {
       const sessionsRef = collection(db, 'users', uid, 'statistics')
-      const sessionsSnap = await getDocs(sessionsRef)
+      const sessionsSnap = await getDocs(query(sessionsRef, limit(sessionLimit)))
 
       const sessions = await Promise.all(
         sessionsSnap.docs.map(async sessionDoc => {
@@ -92,29 +136,32 @@ export function useStatistics() {
           const endedAt = toDate(sessionData.ended_at || sessionData.endedAt)
           const durationMinutes = getSessionDurationMinutes(sessionData, startedAt, endedAt)
 
-          const metricsSnap = await getDocs(collection(db, 'users', uid, 'statistics', sessionDoc.id, 'tracked_metric'))
+          let metrics = []
+          if (includeMetrics) {
+            const metricsSnap = await getDocs(collection(db, 'users', uid, 'statistics', sessionDoc.id, 'tracked_metric'))
 
-          const metrics = await Promise.all(
-            metricsSnap.docs.map(async metricDoc => {
-              const metricData = metricDoc.data()
-              const metricType = inferTypeFromText(
-                metricData.type || metricData.category || metricData.muscle_group || metricData.name
-              )
+            metrics = await Promise.all(
+              metricsSnap.docs.map(async metricDoc => {
+                const metricData = metricDoc.data()
+                const metricType = inferTypeFromText(
+                  metricData.type || metricData.category || metricData.muscle_group || metricData.name
+                )
 
-              const setsSnap = await getDocs(
-                collection(db, 'users', uid, 'statistics', sessionDoc.id, 'tracked_metric', metricDoc.id, 'exercise_set')
-              )
+                const setsSnap = await getDocs(
+                  collection(db, 'users', uid, 'statistics', sessionDoc.id, 'tracked_metric', metricDoc.id, 'exercise_set')
+                )
 
-              const sets = setsSnap.docs.map(setDoc => setDoc.data())
+                const sets = setsSnap.docs.map(setDoc => setDoc.data())
 
-              return {
-                id: metricDoc.id,
-                name: metricData.name || metricData.exercise_name || 'Exercice',
-                type: metricType,
-                sets,
-              }
-            })
-          )
+                return {
+                  id: metricDoc.id,
+                  name: metricData.name || metricData.exercise_name || 'Exercice',
+                  type: metricType,
+                  sets,
+                }
+              })
+            )
+          }
 
           return {
             id: sessionDoc.id,
@@ -130,6 +177,15 @@ export function useStatistics() {
 
       sessions.sort((a, b) => (b.startedAt?.getTime() || 0) - (a.startedAt?.getTime() || 0))
       rawSessions.value = sessions
+
+      try {
+        localStorage.setItem(cacheKey, JSON.stringify({
+          createdAt: Date.now(),
+          sessions: serializeSessions(sessions),
+        }))
+      } catch {
+      }
+
       return sessions
     } catch (e) {
       console.error('[useStatistics] fetchUserStatistics error:', e)
@@ -196,12 +252,107 @@ export function useStatistics() {
       .map(({ load, ...rest }) => rest)
   }
 
+  async function fetchSessionDetails(uid, sessionId) {
+    if (!uid || !sessionId) return null
+
+    const baseSession = rawSessions.value.find(session => session.id === sessionId)
+    if (!baseSession) return null
+
+    try {
+      const metricsSnap = await getDocs(collection(db, 'users', uid, 'statistics', sessionId, 'tracked_metric'))
+
+      const metrics = await Promise.all(
+        metricsSnap.docs.map(async metricDoc => {
+          const metricData = metricDoc.data()
+          const metricType = inferTypeFromText(
+            metricData.type || metricData.category || metricData.muscle_group || metricData.name
+          )
+
+          const setsSnap = await getDocs(
+            collection(db, 'users', uid, 'statistics', sessionId, 'tracked_metric', metricDoc.id, 'exercise_set')
+          )
+
+          const sets = setsSnap.docs.map(setDoc => ({ id: setDoc.id, ...setDoc.data() }))
+
+          return {
+            id: metricDoc.id,
+            name: metricData.name || metricData.exercise_name || 'Exercice',
+            type: metricType,
+            sets,
+          }
+        })
+      )
+
+      return {
+        ...baseSession,
+        metrics,
+      }
+    } catch (e) {
+      console.error('[useStatistics] fetchSessionDetails error:', e)
+      return {
+        ...baseSession,
+        metrics: [],
+      }
+    }
+  }
+
+  async function updateSessionTiming(uid, sessionId, fields) {
+    if (!uid || !sessionId) throw new Error('UID et sessionId requis')
+
+    const payload = {}
+    if (fields.started_at !== undefined) payload.started_at = fields.started_at
+    if (fields.ended_at !== undefined) payload.ended_at = fields.ended_at
+
+    await updateDoc(doc(db, 'users', uid, 'statistics', sessionId), payload)
+
+    const idx = rawSessions.value.findIndex(session => session.id === sessionId)
+    if (idx !== -1) {
+      const current = rawSessions.value[idx]
+      const startedAt = fields.started_at !== undefined ? toDate(fields.started_at) : current.startedAt
+      const endedAt = fields.ended_at !== undefined ? toDate(fields.ended_at) : current.endedAt
+      const nextDuration = startedAt && endedAt
+        ? Math.max(0, Math.round((endedAt.getTime() - startedAt.getTime()) / 60000))
+        : current.durationMinutes
+
+      rawSessions.value[idx] = {
+        ...current,
+        startedAt,
+        endedAt,
+        durationMinutes: nextDuration,
+      }
+    }
+  }
+
+  async function addExerciseSet(uid, sessionId, metricId, fields) {
+    if (!uid || !sessionId || !metricId) throw new Error('UID, sessionId et metricId requis')
+    const ref = await addDoc(
+      collection(db, 'users', uid, 'statistics', sessionId, 'tracked_metric', metricId, 'exercise_set'),
+      fields
+    )
+    return ref.id
+  }
+
+  async function updateExerciseSet(uid, sessionId, metricId, setId, fields) {
+    if (!uid || !sessionId || !metricId || !setId) throw new Error('UID, sessionId, metricId et setId requis')
+    await updateDoc(doc(db, 'users', uid, 'statistics', sessionId, 'tracked_metric', metricId, 'exercise_set', setId), fields)
+  }
+
+  async function deleteExerciseSet(uid, sessionId, metricId, setId) {
+    if (!uid || !sessionId || !metricId || !setId) throw new Error('UID, sessionId, metricId et setId requis')
+    await deleteDoc(doc(db, 'users', uid, 'statistics', sessionId, 'tracked_metric', metricId, 'exercise_set', setId))
+  }
+
   return {
     rawSessions,
     loading,
     error,
     totalSessions,
     fetchUserStatistics,
+    fetchSessionDetails,
+    updateSessionTiming,
+    addExerciseSet,
+    updateExerciseSet,
+    deleteExerciseSet,
     buildTypeDistribution,
     buildPrs,
   }
