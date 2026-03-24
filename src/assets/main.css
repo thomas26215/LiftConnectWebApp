@@ -1,0 +1,148 @@
+/* ═══════════════════════════════════════════
+   DESIGN TOKENS
+═══════════════════════════════════════════ */
+:root {
+  --bg:              #060e1a;
+  --surface:         rgba(13, 28, 58, 0.7);
+  --surface-hover:   rgba(20, 40, 76, 0.85);
+  --border:          rgba(255, 255, 255, 0.07);
+  --border-mid:      rgba(186, 242, 216, 0.15);
+  --border-act:      rgba(186, 242, 216, 0.3);
+  --secondary:       #baf2d8;
+  --secondary-dim:   rgba(186, 242, 216, 0.6);
+  --secondary-faint: rgba(186, 242, 216, 0.07);
+  --text-1:          rgba(255, 255, 255, 0.92);
+  --text-2:          rgba(255, 255, 255, 0.45);
+  --text-3:          rgba(255, 255, 255, 0.25);
+  --font:            'Geist', system-ui, sans-serif;
+  --r:               16px;
+  --r-sm:            10px;
+  --sidebar-w:       220px;
+  --transition:      0.25s cubic-bezier(0.4, 0, 0.2, 1);
+  --spring:          0.35s cubic-bezier(0.34, 1.56, 0.64, 1);
+}
+
+/* ═══════════════════════════════════════════
+   RESET
+═══════════════════════════════════════════ */
+*, *::before, *::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+html { font-size: 15px; }
+
+body {
+  font-family: var(--font);
+  background: var(--bg);
+  color: var(--text-1);
+  min-height: 100vh;
+  -webkit-font-smoothing: antialiased;
+}
+
+a { text-decoration: none; color: inherit; }
+button { font-family: var(--font); cursor: pointer; border: none; }
+input, select { font-family: var(--font); }
+
+/* ═══════════════════════════════════════════
+   SCROLLBAR
+═══════════════════════════════════════════ */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgba(186, 242, 216, 0.15) transparent;
+}
+*::-webkit-scrollbar { width: 4px; }
+*::-webkit-scrollbar-track { background: transparent; }
+*::-webkit-scrollbar-thumb {
+  background: rgba(186, 242, 216, 0.15);
+  border-radius: 2px;
+}
+
+/* ═══════════════════════════════════════════
+   LAYOUT
+═══════════════════════════════════════════ */
+#app {
+  display: flex;
+  min-height: 100vh;
+  overflow: hidden;
+}
+
+/* ═══════════════════════════════════════════
+   TAG BADGES
+═══════════════════════════════════════════ */
+.tag {
+  font-size: 0.58rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+  padding: 3px 8px;
+  border-radius: 6px;
+  border: 1px solid;
+  display: inline-block;
+}
+.tag-push  { color: #f97316; background: rgba(249,115,22,0.08);   border-color: rgba(249,115,22,0.2); }
+.tag-pull  { color: #60a5fa; background: rgba(96,165,250,0.08);   border-color: rgba(96,165,250,0.2); }
+.tag-legs  { color: #a78bfa; background: rgba(167,139,250,0.08);  border-color: rgba(167,139,250,0.2); }
+.tag-full  { color: #34d399; background: rgba(52,211,153,0.08);   border-color: rgba(52,211,153,0.2); }
+.tag-upper { color: #fbbf24; background: rgba(251,191,36,0.08);   border-color: rgba(251,191,36,0.2); }
+.tag-pub   { color: var(--text-3); background: rgba(255,255,255,0.04); border-color: var(--border); }
+
+/* ═══════════════════════════════════════════
+   SHARED BUTTONS
+═══════════════════════════════════════════ */
+.btn-primary {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 9px 18px;
+  border-radius: var(--r-sm);
+  background: var(--secondary);
+  color: #071422;
+  font-size: 0.8rem;
+  font-weight: 700;
+  transition: background var(--transition), transform var(--spring), box-shadow var(--transition);
+  letter-spacing: -0.01em;
+}
+.btn-primary:hover {
+  background: #cef7e8;
+  transform: translateY(-2px);
+  box-shadow: 0 8px 20px rgba(186, 242, 216, 0.25);
+}
+
+.btn-ghost {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 7px 14px;
+  border-radius: var(--r-sm);
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: var(--secondary-dim);
+  background: var(--secondary-faint);
+  border: 1px solid var(--border-mid);
+  transition: all var(--transition);
+}
+.btn-ghost:hover {
+  background: rgba(186, 242, 216, 0.13);
+  border-color: var(--border-act);
+  color: var(--secondary);
+}
+
+/* ═══════════════════════════════════════════
+   ANIMATIONS
+═══════════════════════════════════════════ */
+@keyframes fade-up {
+  from { opacity: 0; transform: translateY(16px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+.animate-in {
+  animation: fade-up 0.5s cubic-bezier(0.4, 0, 0.2, 1) both;
+}
+.delay-1 { animation-delay: 0.05s; }
+.delay-2 { animation-delay: 0.1s; }
+.delay-3 { animation-delay: 0.15s; }
+.delay-4 { animation-delay: 0.2s; }
+.delay-5 { animation-delay: 0.25s; }
+.delay-6 { animation-delay: 0.3s; }
