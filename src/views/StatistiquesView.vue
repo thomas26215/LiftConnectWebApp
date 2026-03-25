@@ -35,9 +35,14 @@
 
       <div class="stats-grid">
         <!-- Volume hebdo -->
-        <div class="chart-card wide animate-in delay-1">
+        <div v-if="periodMode !== 'day'" class="chart-card wide animate-in delay-1">
           <div class="chart-title">{{ volumeChartTitle }}</div>
           <div class="chart-sub">{{ volumeChartSubtitle }}</div>
+          <div class="bar-legend">
+            <button type="button" class="legend-chip load" :class="{ inactive: !volumeSeriesVisibility.load }" @click="toggleVolumeSeries('load')">Charge totale</button>
+            <button type="button" class="legend-chip reps" :class="{ inactive: !volumeSeriesVisibility.reps }" @click="toggleVolumeSeries('reps')">Répétitions totales</button>
+            <button type="button" class="legend-chip duration" :class="{ inactive: !volumeSeriesVisibility.duration }" @click="toggleVolumeSeries('duration')">Durée totale</button>
+          </div>
           <div class="chart-shell">
             <div class="chart-y-labels">
               <span>{{ weeklyScaleLabels[0] }}</span>
@@ -50,10 +55,22 @@
                 <div class="grid-line"></div>
                 <div class="grid-line"></div>
               </div>
-              <div v-for="b in weeklyBars" :key="b.label" class="bar-col">
-                <div class="bar-value">{{ b.displayValue }}</div>
-                <div class="bar-track">
-                  <div class="bar" :class="{ highlight: b.highlight }" :style="`height:${b.height}%`"></div>
+              <div
+                v-for="b in weeklyBars"
+                :key="b.label"
+                class="bar-col"
+                @mouseenter="hoveredVolumeKey = b.label"
+                @mouseleave="hoveredVolumeKey = null"
+              >
+                <div v-if="hoveredVolumeKey === b.label" class="bar-tooltip">
+                  <span v-if="volumeSeriesVisibility.load" class="bar-value load">{{ b.loadDisplay }}</span>
+                  <span v-if="volumeSeriesVisibility.reps" class="bar-value reps">{{ b.repsDisplay }}</span>
+                  <span v-if="volumeSeriesVisibility.duration" class="bar-value duration">{{ b.durationDisplay }}</span>
+                </div>
+                <div class="bar-track multi" :class="`series-${weeklyVisibleSeriesCount}`">
+                  <div v-if="volumeSeriesVisibility.load" class="bar load" :style="`height:${b.loadHeight}%`"></div>
+                  <div v-if="volumeSeriesVisibility.reps" class="bar reps" :style="`height:${b.repsHeight}%`"></div>
+                  <div v-if="volumeSeriesVisibility.duration" class="bar duration" :style="`height:${b.durationHeight}%`"></div>
                 </div>
                 <div class="bar-label">{{ b.label }}</div>
               </div>
@@ -135,7 +152,7 @@
           </div>
         </div>
 
-        <div class="chart-card wide animate-in delay-4">
+        <div v-if="periodMode !== 'day'" class="chart-card wide animate-in delay-4">
           <div class="chart-title">{{ cadenceTitle }}</div>
           <div class="chart-sub">{{ cadenceSubtitle }}</div>
           <div class="month-grid">
@@ -200,8 +217,13 @@
                   </div>
 
                   <div class="detail-actions">
-                    <button v-if="!isEditingSession" type="button" class="detail-btn" @click="startEditingSession">Modifier</button>
-                    <template v-else>
+                    <button v-if="!isEditingSession && selectedSessionDetail?.source !== 'sessions'" type="button" class="detail-btn" @click="startEditingSession">
+                      Modifier
+                    </button>
+                    <button v-if="!isEditingSession" type="button" class="detail-btn danger" :disabled="deletingSession" @click="handleDeleteSession">
+                      {{ deletingSession ? 'Suppression…' : 'Supprimer la séance' }}
+                    </button>
+                    <template v-if="isEditingSession">
                       <button type="button" class="detail-btn" @click="cancelEditingSession">Annuler</button>
                       <button type="button" class="detail-btn primary" :disabled="savingDetail" @click="saveSessionChanges">
                         {{ savingDetail ? 'Enregistrement…' : 'Enregistrer' }}
@@ -243,8 +265,13 @@
 
                 <div v-else class="metric-list">
                   <div v-for="(metric, metricIndex) in editableSession.metrics" :key="metric.id" class="metric-item">
-                    <div class="metric-title">{{ metric.name }}</div>
-                    <div class="metric-sub">{{ metric.sets.length }} série(s)</div>
+                    <div class="metric-head">
+                      <div>
+                        <div class="metric-title">{{ metric.name }}</div>
+                        <div class="metric-sub">{{ metric.sets.length }} série(s)</div>
+                      </div>
+                      <button type="button" class="set-remove metric-remove" @click="removeMetricRow(metricIndex)">Suppr. exo</button>
+                    </div>
 
                     <div class="set-edit-list">
                       <div v-for="(setRow, setIndex) in metric.sets" :key="setRow.id || setIndex" class="set-edit-row">
@@ -271,10 +298,12 @@
 
 <script setup>
 import { computed, ref, watch } from 'vue'
+import { collection, limit, onSnapshot, query } from 'firebase/firestore'
 import PageHeader from '@/components/layout/PageHeader.vue'
 import ScrollArea from '@/components/layout/ScrollArea.vue'
 import { useAuthStore } from '@/stores/auth'
-import { useStatistics } from '@/composables/useStatistics'
+import { useStatistics } from '@/composables/useStatistics.js'
+import { db } from '@/firebase'
 
 const authStore = useAuthStore()
 const {
@@ -287,6 +316,10 @@ const {
   addExerciseSet,
   updateExerciseSet,
   deleteExerciseSet,
+  deleteTrackedMetric,
+  deleteSession,
+  subscribeStatisticsRevision,
+  applyRealtimeSessionChange,
   buildTypeDistribution,
   buildPrs,
 } = useStatistics()
@@ -301,6 +334,29 @@ const isEditingSession = ref(false)
 const savingDetail = ref(false)
 const editableSession = ref(null)
 const originalSessionSnapshot = ref(null)
+const revisionKey = ref('')
+const deletingSession = ref(false)
+const hoveredVolumeKey = ref(null)
+const volumeSeriesVisibility = ref({
+  load: true,
+  reps: true,
+  duration: true,
+})
+
+function toggleVolumeSeries(seriesKey) {
+  const visibility = volumeSeriesVisibility.value
+  const activeCount = Object.values(visibility).filter(Boolean).length
+  if (visibility[seriesKey] && activeCount <= 1) return
+
+  volumeSeriesVisibility.value = {
+    ...visibility,
+    [seriesKey]: !visibility[seriesKey],
+  }
+}
+
+const weeklyVisibleSeriesCount = computed(() =>
+  Math.max(1, Object.values(volumeSeriesVisibility.value).filter(Boolean).length)
+)
 
 const rangeLabel = computed(() => {
   if (selectedRange.value === '7d') return 'Cette semaine'
@@ -326,21 +382,21 @@ const filteredSessions = computed(() => {
   })
 })
 
+const chartSessions = computed(() => {
+  return filteredSessions.value
+})
+
 const previousPeriodSessions = computed(() => {
   const now = Date.now()
   const periodMs = rangeDays.value * 24 * 60 * 60 * 1000
-  const startCurrent = now - periodMs
-  const startPrevious = startCurrent - periodMs
+  const currentStart = now - periodMs
+  const previousStart = currentStart - periodMs
 
   return rawSessions.value.filter(session => {
     const started = session.startedAt?.getTime?.()
     if (!started) return false
-    return started >= startPrevious && started < startCurrent
+    return started >= previousStart && started < currentStart
   })
-})
-
-const chartSessions = computed(() => {
-  return filteredSessions.value
 })
 
 const firstUsageDate = computed(() => {
@@ -375,16 +431,8 @@ const currentTotalMinutes = computed(() =>
   filteredSessions.value.reduce((sum, session) => sum + (session.durationMinutes || 0), 0)
 )
 
-const previousTotalMinutes = computed(() =>
-  previousPeriodSessions.value.reduce((sum, session) => sum + (session.durationMinutes || 0), 0)
-)
-
 const currentMetricsCount = computed(() =>
   filteredSessions.value.reduce((sum, session) => sum + session.metrics.length, 0)
-)
-
-const previousMetricsCount = computed(() =>
-  previousPeriodSessions.value.reduce((sum, session) => sum + session.metrics.length, 0)
 )
 
 const averageDuration = computed(() => {
@@ -392,69 +440,141 @@ const averageDuration = computed(() => {
   return Math.round(currentTotalMinutes.value / filteredSessions.value.length)
 })
 
+const previousTotalMinutes = computed(() =>
+  previousPeriodSessions.value.reduce((sum, session) => sum + (session.durationMinutes || 0), 0)
+)
+
+const previousMetricsCount = computed(() =>
+  previousPeriodSessions.value.reduce((sum, session) => sum + session.metrics.length, 0)
+)
+
 const previousAverageDuration = computed(() => {
   if (!previousPeriodSessions.value.length) return 0
   const total = previousPeriodSessions.value.reduce((sum, session) => sum + (session.durationMinutes || 0), 0)
   return Math.round(total / previousPeriodSessions.value.length)
 })
 
-const uniqueSessionDaysSorted = computed(() => {
-  const set = new Set(
+function startOfWeekMonday(date) {
+  const d = startOfDay(new Date(date))
+  const day = d.getDay()
+  const diff = day === 0 ? -6 : 1 - day
+  d.setDate(d.getDate() + diff)
+  return d
+}
+
+function weekKey(date) {
+  const d = startOfWeekMonday(date)
+  const y = d.getFullYear()
+  const m = String(d.getMonth() + 1).padStart(2, '0')
+  const day = String(d.getDate()).padStart(2, '0')
+  return `${y}-${m}-${day}`
+}
+
+const weeksWithSessions = computed(() => {
+  return new Set(
     rawSessions.value
-      .map(session => {
-        if (!session.startedAt) return null
-        const d = new Date(session.startedAt)
-        const y = d.getFullYear()
-        const m = String(d.getMonth() + 1).padStart(2, '0')
-        const day = String(d.getDate()).padStart(2, '0')
-        return `${y}-${m}-${day}`
-      })
+      .map(session => (session.startedAt ? weekKey(session.startedAt) : null))
       .filter(Boolean)
   )
-  return Array.from(set).sort((a, b) => (a > b ? -1 : 1))
 })
 
-const currentStreakDays = computed(() => {
-  if (!uniqueSessionDaysSorted.value.length) return 0
-
-  const today = new Date()
-  const toKey = date => {
-    const y = date.getFullYear()
-    const m = String(date.getMonth() + 1).padStart(2, '0')
-    const d = String(date.getDate()).padStart(2, '0')
-    return `${y}-${m}-${d}`
-  }
+const currentStreakWeeks = computed(() => {
+  if (!weeksWithSessions.value.size) return 0
 
   let streak = 0
-  let cursor = new Date(today)
+  let cursor = startOfWeekMonday(new Date())
 
-  while (uniqueSessionDaysSorted.value.includes(toKey(cursor))) {
+  while (weeksWithSessions.value.has(weekKey(cursor))) {
     streak += 1
-    cursor.setDate(cursor.getDate() - 1)
+    cursor.setDate(cursor.getDate() - 7)
   }
 
   return streak
 })
 
-const bestPeriodLabel = computed(() => {
-  if (periodMode.value === 'day') return 'Jour le plus actif'
-  if (periodMode.value === 'month') return 'Mois le plus actif'
-  return 'Semaine la plus active'
-})
+const bestPeriodLabel = computed(() => 'Semaine la plus active')
 
-const volumeUnitLabel = computed(() => (hasWeightVolumeData.value ? 'kg' : 'séances'))
+const volumeUnitLabel = computed(() => 'séances')
 
 const bestWeekInsight = computed(() => {
-  const best = weeklyBars.value.reduce((acc, item) => (item.count > acc.count ? item : acc), { label: '—', count: 0 })
-  return best
+  const weekCounts = new Map()
+
+  rawSessions.value.forEach(session => {
+    if (!session.startedAt) return
+    const key = weekKey(session.startedAt)
+    weekCounts.set(key, (weekCounts.get(key) || 0) + 1)
+  })
+
+  if (!weekCounts.size) return { label: '—', count: 0 }
+
+  let bestKey = null
+  let bestCount = 0
+  weekCounts.forEach((count, key) => {
+    if (count > bestCount) {
+      bestCount = count
+      bestKey = key
+    }
+  })
+
+  const start = bestKey ? new Date(bestKey) : null
+  const label = start
+    ? `du ${start.toLocaleDateString('fr-FR', { day: '2-digit', month: '2-digit' })}`
+    : '—'
+
+  return { label, count: bestCount }
 })
+
+const recent30Sessions = computed(() => {
+  const now = Date.now()
+  const start = now - (30 * 24 * 60 * 60 * 1000)
+  return rawSessions.value.filter(session => {
+    const started = session.startedAt?.getTime?.()
+    return started && started >= start && started <= now
+  })
+})
+
+const previous30Sessions = computed(() => {
+  const now = Date.now()
+  const currentStart = now - (30 * 24 * 60 * 60 * 1000)
+  const previousStart = currentStart - (30 * 24 * 60 * 60 * 1000)
+  return rawSessions.value.filter(session => {
+    const started = session.startedAt?.getTime?.()
+    return started && started >= previousStart && started < currentStart
+  })
+})
+
+const recent30Minutes = computed(() =>
+  recent30Sessions.value.reduce((sum, session) => sum + (session.durationMinutes || 0), 0)
+)
+
+const previous30Minutes = computed(() =>
+  previous30Sessions.value.reduce((sum, session) => sum + (session.durationMinutes || 0), 0)
+)
+
+const recent30AverageDuration = computed(() => {
+  if (!recent30Sessions.value.length) return 0
+  return Math.round(recent30Minutes.value / recent30Sessions.value.length)
+})
+
+const previous30AverageDuration = computed(() => {
+  if (!previous30Sessions.value.length) return 0
+  return Math.round(previous30Minutes.value / previous30Sessions.value.length)
+})
+
+const recent30MetricsCount = computed(() =>
+  recent30Sessions.value.reduce((sum, session) => sum + session.metrics.length, 0)
+)
+
+const previous30MetricsCount = computed(() =>
+  previous30Sessions.value.reduce((sum, session) => sum + session.metrics.length, 0)
+)
 
 const lastSession = computed(() => rawSessions.value[0] || null)
 
 const insightCards = computed(() => [
   {
     label: 'Streak actuel',
-    value: `${currentStreakDays.value} jour${currentStreakDays.value > 1 ? 's' : ''}`,
+    value: `${currentStreakWeeks.value} semaine${currentStreakWeeks.value > 1 ? 's' : ''}`,
     sub: 'Série en cours',
   },
   {
@@ -616,26 +736,29 @@ function buildBuckets(mode) {
 const chartBuckets = computed(() => buildBuckets(periodMode.value))
 
 const volumeChartTitle = computed(() => {
-  if (periodMode.value === 'day') return 'Volume quotidien'
+  if (periodMode.value === 'day') return 'Volume hebdomadaire'
   if (periodMode.value === 'month') return 'Volume mensuel'
   return 'Volume hebdomadaire'
 })
 
 const volumeChartSubtitle = computed(() => {
-  if (periodMode.value === 'day') {
-    return hasWeightVolumeData.value
-      ? 'Charge totale (kg × reps) répartie sur les 7 derniers jours'
-      : 'Nombre de séances réparti sur les 7 derniers jours'
-  }
-  if (periodMode.value === 'month') {
-    return hasWeightVolumeData.value
-      ? 'Charge totale (kg × reps) par mois (12 mois)'
-      : 'Nombre de séances par mois (12 mois)'
-  }
-  return hasWeightVolumeData.value
-    ? 'Charge totale (kg × reps) par semaine'
-    : 'Nombre de séances par semaine'
+  if (periodMode.value === 'day') return 'Charge, reps et durée de la semaine'
+  if (periodMode.value === 'month') return 'Charge, reps et durée par mois (12 mois)'
+  return 'Charge, reps et durée par semaine'
 })
+
+function getSessionTotalReps(session) {
+  let total = 0
+
+  session.metrics.forEach(metric => {
+    metric.sets.forEach(setData => {
+      const reps = getSetReps(setData)
+      if (reps != null) total += reps
+    })
+  })
+
+  return total
+}
 
 const weeklyBars = computed(() => {
   const buckets = chartBuckets.value.map(bucket => {
@@ -644,33 +767,34 @@ const weeklyBars = computed(() => {
       return t && t >= bucket.start.getTime() && t < bucket.end.getTime()
     })
 
-    if (periodMode.value === 'day') {
-      return { label: bucket.label, value: sessions.length }
-    }
+    const totalLoad = sessions.reduce((sum, session) => sum + getSessionTonnage(session).total, 0)
+    const totalReps = sessions.reduce((sum, session) => sum + getSessionTotalReps(session), 0)
+    const totalDuration = sessions.reduce((sum, session) => sum + Number(session.durationMinutes || 0), 0)
 
-    if (hasWeightVolumeData.value) {
-      const tonnage = sessions.reduce((sum, session) => sum + getSessionTonnage(session).total, 0)
-      return { label: bucket.label, value: tonnage }
+    return {
+      label: bucket.label,
+      totalLoad,
+      totalReps,
+      totalDuration,
     }
-
-    return { label: bucket.label, value: sessions.length }
   })
 
-  const maxValue = Math.max(...buckets.map(b => b.value), 1)
+  const maxLoad = Math.max(...buckets.map(b => b.totalLoad), 1)
+  const maxReps = Math.max(...buckets.map(b => b.totalReps), 1)
+  const maxDuration = Math.max(...buckets.map(b => b.totalDuration), 1)
+
   return buckets.map(bucket => ({
     label: bucket.label,
-    count: bucket.value,
-    displayValue: hasWeightVolumeData.value ? `${Math.round(bucket.value)} kg` : String(bucket.value),
-    height: bucket.value > 0 ? Math.max(10, Math.round((bucket.value / maxValue) * 100)) : 0,
-    highlight: bucket.value === maxValue && bucket.value > 0,
+    loadDisplay: `${Math.round(bucket.totalLoad)} kg`,
+    repsDisplay: `${Math.round(bucket.totalReps)} reps`,
+    durationDisplay: `${Math.round(bucket.totalDuration)} min`,
+    loadHeight: bucket.totalLoad > 0 ? Math.max(10, Math.round((bucket.totalLoad / maxLoad) * 100)) : 0,
+    repsHeight: bucket.totalReps > 0 ? Math.max(10, Math.round((bucket.totalReps / maxReps) * 100)) : 0,
+    durationHeight: bucket.totalDuration > 0 ? Math.max(10, Math.round((bucket.totalDuration / maxDuration) * 100)) : 0,
   }))
 })
 
-const weeklyMaxCount = computed(() => Math.max(...weeklyBars.value.map(b => b.count), 0))
-const weeklyScaleLabels = computed(() => {
-  if (!weeklyMaxCount.value) return [0, 0, 0]
-  return [weeklyMaxCount.value, Math.ceil(weeklyMaxCount.value / 2), 0]
-})
+const weeklyScaleLabels = computed(() => [100, 50, 0])
 
 const durationSeries = computed(() => {
   return chartBuckets.value.map(bucket => {
@@ -736,13 +860,13 @@ const prs = computed(() => buildPrs(chartSessions.value))
 const historySessions = computed(() => rawSessions.value)
 
 const cadenceTitle = computed(() => {
-  if (periodMode.value === 'day') return 'Rythme quotidien'
+  if (periodMode.value === 'day') return 'Rythme hebdomadaire'
   if (periodMode.value === 'month') return 'Rythme mensuel'
   return 'Rythme hebdomadaire'
 })
 
 const cadenceSubtitle = computed(() => {
-  if (periodMode.value === 'day') return 'Volume et temps sur les 7 derniers jours'
+  if (periodMode.value === 'day') return 'Volume et temps de la semaine'
   if (periodMode.value === 'month') return 'Volume et temps sur les 12 derniers mois'
   return 'Volume et temps sur les 12 dernières semaines'
 })
@@ -856,6 +980,10 @@ function removeSetRow(metricIndex, setIndex) {
   editableSession.value.metrics[metricIndex].sets.splice(setIndex, 1)
 }
 
+function removeMetricRow(metricIndex) {
+  editableSession.value.metrics.splice(metricIndex, 1)
+}
+
 async function saveSessionChanges() {
   const uid = authStore.user?.uid
   const sessionId = selectedSessionId.value
@@ -874,6 +1002,14 @@ async function saveSessionChanges() {
     }
     if (Object.keys(timingUpdates).length) {
       await updateSessionTiming(uid, sessionId, timingUpdates)
+    }
+
+    const removedMetrics = originalSessionSnapshot.value.metrics.filter(
+      originalMetric => !editableSession.value.metrics.some(metric => metric.id === originalMetric.id)
+    )
+
+    for (const removedMetric of removedMetrics) {
+      await deleteTrackedMetric(uid, sessionId, removedMetric.id)
     }
 
     for (const metric of editableSession.value.metrics) {
@@ -947,20 +1083,109 @@ async function openSessionDetail(session) {
   }
 }
 
-watch(selectedRange, async () => {
+async function handleDeleteSession() {
   const uid = authStore.user?.uid
-  if (!uid) return
+  const sessionId = selectedSessionId.value
+  if (!uid || !sessionId || deletingSession.value) return
 
-  const sessionLimitByRange = {
-    '7d': 60,
-    '30d': 140,
-    '90d': 220,
-    '365d': 500,
+  const confirmed = window.confirm('Supprimer cette séance complète ? Cette action est irréversible.')
+  if (!confirmed) return
+
+  deletingSession.value = true
+  detailError.value = null
+
+  try {
+    await deleteSession(uid, sessionId)
+    sessionDetailsCache.value.delete(sessionId)
+    selectedSessionId.value = null
+    selectedSessionDetail.value = null
+    isEditingSession.value = false
+    editableSession.value = null
+    originalSessionSnapshot.value = null
+  } catch {
+    detailError.value = 'error'
+  } finally {
+    deletingSession.value = false
+  }
+}
+
+const sessionLimitByRange = {
+  '7d': 60,
+  '30d': 140,
+  '90d': 220,
+  '365d': 500,
+}
+
+async function loadStatistics(uid, forceRefresh = false) {
+  if (!uid) {
+    selectedSessionId.value = null
+    selectedSessionDetail.value = null
+    sessionDetailsCache.value.clear()
+    return
   }
 
   await fetchUserStatistics(uid, {
     sessionLimit: sessionLimitByRange[selectedRange.value] || 220,
-    includeMetrics: false,
+    includeMetrics: true,
+    forceRefresh,
+  })
+}
+
+watch([selectedRange, () => authStore.user?.uid], async ([, uid]) => {
+  await loadStatistics(uid)
+}, { immediate: true })
+
+watch(() => authStore.user?.uid, (uid, _oldUid, onCleanup) => {
+  revisionKey.value = ''
+
+  if (!uid) return
+
+  const unsubscribe = subscribeStatisticsRevision(uid, ({ revision, updatedAt }) => {
+    const nextKey = `${revision}_${updatedAt}`
+    if (!nextKey || nextKey === revisionKey.value) return
+
+    revisionKey.value = nextKey
+    loadStatistics(uid, true)
+  })
+
+  onCleanup(() => {
+    unsubscribe?.()
+  })
+}, { immediate: true })
+
+watch(() => authStore.user?.uid, (uid, _oldUid, onCleanup) => {
+  if (!uid) return
+
+  const listeners = [
+    { source: 'statistics', q: query(collection(db, 'users', uid, 'statistics'), limit(1)) },
+    { source: 'sessions', q: query(collection(db, 'sessions', uid, 'sessions'), limit(1)) },
+    { source: 'exercises', q: query(collection(db, 'exercises', uid, 'exercises'), limit(1)) },
+  ]
+
+  const unsubs = listeners.map(target => {
+    let initialized = false
+    const targetQuery = target?.q || target
+    const targetSource = target?.source || null
+
+    return onSnapshot(targetQuery, snapshot => {
+      if (!initialized) {
+        initialized = true
+        return
+      }
+
+      if (targetSource) {
+        snapshot.docChanges().forEach(change => {
+          applyRealtimeSessionChange(change, targetSource)
+        })
+        return
+      }
+
+      loadStatistics(uid, true)
+    })
+  })
+
+  onCleanup(() => {
+    unsubs.forEach(unsub => unsub?.())
   })
 }, { immediate: true })
 </script>
@@ -1015,6 +1240,32 @@ watch(selectedRange, async () => {
 .chart-title { font-size: 0.82rem; font-weight: 600; color: var(--text-1); margin-bottom: 4px; }
 .chart-sub { font-size: 0.7rem; color: var(--text-3); margin-bottom: 16px; }
 
+.bar-legend {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+
+.legend-chip {
+  font-size: 0.62rem;
+  padding: 5px 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: rgba(255,255,255,0.03);
+  color: var(--text-2);
+  cursor: pointer;
+  transition: all var(--transition);
+}
+
+.legend-chip.inactive {
+  opacity: 0.42;
+}
+
+.legend-chip.load { color: #f97316; border-color: rgba(249, 115, 22, 0.38); }
+.legend-chip.reps { color: #60a5fa; border-color: rgba(96, 165, 250, 0.38); }
+.legend-chip.duration { color: #a78bfa; border-color: rgba(167, 139, 250, 0.38); }
+
 .chart-shell { display: grid; grid-template-columns: 34px 1fr; gap: 8px; align-items: end; }
 .chart-y-labels {
   height: 128px;
@@ -1066,22 +1317,54 @@ watch(selectedRange, async () => {
   display: flex;
   align-items: flex-end;
 }
+.bar-track.multi {
+  gap: 4px;
+}
+
+.bar-tooltip {
+  min-height: 32px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  align-items: center;
+  justify-content: center;
+}
+
 .bar-value {
   font-size: 0.62rem;
-  color: var(--secondary-dim);
+  color: var(--text-3);
   line-height: 1;
   min-height: 12px;
 }
+.bar-value.load { color: #f97316; }
+.bar-value.reps { color: #60a5fa; }
+.bar-value.duration { color: #a78bfa; }
+
 .bar {
   width: 100%; border-radius: 5px 5px 0 0;
-  background: linear-gradient(180deg, rgba(186,242,216,0.36), rgba(186,242,216,0.12));
+  background: rgba(186,242,216,0.2);
   border: 1px solid rgba(186,242,216,0.16);
   transition: background var(--transition), transform var(--spring), box-shadow var(--transition);
   cursor: default;
   box-shadow: 0 8px 18px rgba(0,0,0,0.18);
 }
-.bar:hover { background: rgba(186,242,216,0.3); transform: scaleY(1.03); transform-origin: bottom; }
-.bar.highlight { background: rgba(186,242,216,0.35); border-color: rgba(186,242,216,0.4); }
+
+.bar.load {
+  background: rgba(249, 115, 22, 0.62);
+  border-color: rgba(249, 115, 22, 0.85);
+}
+
+.bar.reps {
+  background: rgba(96, 165, 250, 0.62);
+  border-color: rgba(96, 165, 250, 0.85);
+}
+
+.bar.duration {
+  background: rgba(167, 139, 250, 0.62);
+  border-color: rgba(167, 139, 250, 0.85);
+}
+
+.bar:hover { transform: scaleY(1.03); transform-origin: bottom; }
 .bar-label { font-size: 0.58rem; color: var(--text-3); }
 
 .line-chart { position: relative; height: 128px; }
@@ -1132,6 +1415,7 @@ watch(selectedRange, async () => {
 .pr-date { font-size: 0.62rem; color: var(--text-3); margin-top: 2px; }
 
 .empty-state { color: var(--text-3); font-size: 0.8rem; margin-top: 8px; }
+
 
 .weekday-chart {
   display: grid;
@@ -1304,6 +1588,12 @@ watch(selectedRange, async () => {
   font-weight: 700;
 }
 
+.detail-btn.danger {
+  border-color: rgba(252, 165, 165, 0.42);
+  background: rgba(252, 165, 165, 0.08);
+  color: #fca5a5;
+}
+
 .detail-btn:disabled {
   opacity: 0.6;
   cursor: not-allowed;
@@ -1364,6 +1654,13 @@ watch(selectedRange, async () => {
   border-radius: 8px;
   padding: 10px;
   background: rgba(255,255,255,0.02);
+}
+
+.metric-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 10px;
 }
 
 .metric-title {
@@ -1429,6 +1726,10 @@ watch(selectedRange, async () => {
   font-size: 0.68rem;
   padding: 0 10px;
   cursor: pointer;
+}
+
+.metric-remove {
+  white-space: nowrap;
 }
 
 .set-add {

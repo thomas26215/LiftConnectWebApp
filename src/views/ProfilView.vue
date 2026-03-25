@@ -119,12 +119,14 @@
 </template>
 
 <script setup>
-import { computed, onMounted, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
+import { collection, doc, limit, onSnapshot, orderBy, query } from 'firebase/firestore'
 import { useRouter } from 'vue-router'
 import { useAuthStore } from '@/stores/auth'
 import { useUsers } from '@/composables/useUsers'
 import PageHeader from '@/components/layout/PageHeader.vue'
 import ScrollArea from '@/components/layout/ScrollArea.vue'
+import { db } from '@/firebase'
 
 const router = useRouter()
 const authStore = useAuthStore()
@@ -247,13 +249,46 @@ async function loadLastWorkouts(uid) {
   }
 }
 
-onMounted(async () => {
-  const uid = authStore.user?.uid
-  if (!uid) return
-  await fetchUser(uid)
-  syncFormFromProfile()
-  await loadLastWorkouts(uid)
-})
+watch(
+  () => authStore.user?.uid,
+  async (uid, _oldUid, onCleanup) => {
+    if (!uid) {
+      lastWorkouts.value = []
+      return
+    }
+
+    await fetchUser(uid)
+    syncFormFromProfile()
+    await loadLastWorkouts(uid)
+
+    let userInitialized = false
+    const unsubscribeUser = onSnapshot(doc(db, 'users', uid), async () => {
+      if (!userInitialized) {
+        userInitialized = true
+        return
+      }
+      await fetchUser(uid)
+    })
+
+    let workoutsInitialized = false
+    const unsubscribeWorkouts = onSnapshot(
+      query(collection(db, 'users', uid, 'last_workouts'), orderBy('date', 'desc'), limit(1)),
+      async () => {
+        if (!workoutsInitialized) {
+          workoutsInitialized = true
+          return
+        }
+        await loadLastWorkouts(uid)
+      }
+    )
+
+    onCleanup(() => {
+      unsubscribeUser?.()
+      unsubscribeWorkouts?.()
+    })
+  },
+  { immediate: true }
+)
 
 async function handleLogout() {
   await authStore.logout()

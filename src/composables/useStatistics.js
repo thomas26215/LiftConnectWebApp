@@ -1,5 +1,18 @@
 import { computed, ref } from 'vue'
-import { addDoc, collection, deleteDoc, doc, getDocs, query, limit, updateDoc } from 'firebase/firestore'
+import {
+  addDoc,
+  collection,
+  deleteDoc,
+  doc,
+  getDocs,
+  query,
+  limit,
+  updateDoc,
+  setDoc,
+  serverTimestamp,
+  increment,
+  onSnapshot,
+} from 'firebase/firestore'
 import { db } from '@/firebase'
 
 const DISTRIBUTION_COLORS = ['#f97316', '#60a5fa', '#a78bfa', '#34d399', '#fbbf24', '#fb7185']
@@ -89,6 +102,52 @@ function readBestLoadFromSet(setData) {
   return null
 }
 
+function parseSessionIdentifier(sessionId) {
+  const value = String(sessionId || '')
+  if (value.startsWith('statistics:')) {
+    return { source: 'statistics', docId: value.slice('statistics:'.length) }
+  }
+  if (value.startsWith('sessions:')) {
+    return { source: 'sessions', docId: value.slice('sessions:'.length) }
+  }
+  return { source: 'statistics', docId: value }
+}
+
+function buildSessionFromDoc(sessionDoc, source = 'statistics') {
+  const sessionData = sessionDoc.data() || {}
+  const startedAt = toDate(sessionData.started_at || sessionData.startedAt || sessionData.date || sessionData.created_at)
+  const endedAt = toDate(sessionData.ended_at || sessionData.endedAt)
+  const durationMinutes = getSessionDurationMinutes(sessionData, startedAt, endedAt)
+
+  return {
+    id: `${source}:${sessionDoc.id}`,
+    sourceId: sessionData.id ?? null,
+    source,
+    name: sessionData.session_name || sessionData.name || 'Séance',
+    startedAt,
+    endedAt,
+    durationMinutes,
+    metrics: [],
+  }
+}
+
+async function touchStatisticsRevision(uid) {
+  if (!uid) return
+
+  try {
+    await setDoc(
+      doc(db, 'users', uid, 'statistics_meta', 'cache_revision'),
+      {
+        revision: increment(1),
+        updated_at: serverTimestamp(),
+      },
+      { merge: true }
+    )
+  } catch (e) {
+    console.warn('[useStatistics] touchStatisticsRevision warning:', e)
+  }
+}
+
 export function useStatistics() {
   const rawSessions = ref([])
   const loading = ref(false)
@@ -126,15 +185,14 @@ export function useStatistics() {
     error.value = null
 
     try {
-      const sessionsRef = collection(db, 'users', uid, 'statistics')
-      const sessionsSnap = await getDocs(query(sessionsRef, limit(sessionLimit)))
+      const [statisticsSnap, mobileSessionsSnap] = await Promise.all([
+        getDocs(query(collection(db, 'users', uid, 'statistics'), limit(sessionLimit))).catch(() => ({ docs: [] })),
+        getDocs(query(collection(db, 'sessions', uid, 'sessions'), limit(sessionLimit))).catch(() => ({ docs: [] })),
+      ])
 
-      const sessions = await Promise.all(
-        sessionsSnap.docs.map(async sessionDoc => {
-          const sessionData = sessionDoc.data()
-          const startedAt = toDate(sessionData.started_at || sessionData.startedAt || sessionData.date || sessionData.created_at)
-          const endedAt = toDate(sessionData.ended_at || sessionData.endedAt)
-          const durationMinutes = getSessionDurationMinutes(sessionData, startedAt, endedAt)
+      const statisticsSessions = await Promise.all(
+        statisticsSnap.docs.map(async sessionDoc => {
+          const session = buildSessionFromDoc(sessionDoc, 'statistics')
 
           let metrics = []
           if (includeMetrics) {
@@ -163,17 +221,13 @@ export function useStatistics() {
             )
           }
 
-          return {
-            id: sessionDoc.id,
-            sourceId: sessionData.id ?? null,
-            name: sessionData.session_name || sessionData.name || 'Séance',
-            startedAt,
-            endedAt,
-            durationMinutes,
-            metrics,
-          }
+          return { ...session, metrics }
         })
       )
+
+      const mobileSessions = mobileSessionsSnap.docs.map(sessionDoc => buildSessionFromDoc(sessionDoc, 'sessions'))
+
+      const sessions = [...statisticsSessions, ...mobileSessions]
 
       sessions.sort((a, b) => (b.startedAt?.getTime() || 0) - (a.startedAt?.getTime() || 0))
       rawSessions.value = sessions
@@ -198,6 +252,40 @@ export function useStatistics() {
   }
 
   const totalSessions = computed(() => rawSessions.value.length)
+
+  function upsertRawSession(nextSession) {
+    const index = rawSessions.value.findIndex(session => session.id === nextSession.id)
+    if (index === -1) {
+      rawSessions.value = [...rawSessions.value, nextSession].sort((a, b) => (b.startedAt?.getTime() || 0) - (a.startedAt?.getTime() || 0))
+      return
+    }
+
+    const previous = rawSessions.value[index]
+    rawSessions.value[index] = {
+      ...previous,
+      ...nextSession,
+      metrics: nextSession.metrics?.length ? nextSession.metrics : (previous.metrics || []),
+    }
+    rawSessions.value = [...rawSessions.value].sort((a, b) => (b.startedAt?.getTime() || 0) - (a.startedAt?.getTime() || 0))
+  }
+
+  function removeRawSession(sessionId) {
+    rawSessions.value = rawSessions.value.filter(session => session.id !== sessionId)
+  }
+
+  function applyRealtimeSessionChange(change, source = 'statistics') {
+    if (!change?.doc?.id) return
+
+    const sessionId = `${source}:${change.doc.id}`
+
+    if (change.type === 'removed') {
+      removeRawSession(sessionId)
+      return
+    }
+
+    const mapped = buildSessionFromDoc(change.doc, source)
+    upsertRawSession(mapped)
+  }
 
   function buildTypeDistribution(sessions) {
     const counts = new Map()
@@ -258,8 +346,16 @@ export function useStatistics() {
     const baseSession = rawSessions.value.find(session => session.id === sessionId)
     if (!baseSession) return null
 
+    const { source, docId } = parseSessionIdentifier(sessionId)
+    if (source !== 'statistics') {
+      return {
+        ...baseSession,
+        metrics: [],
+      }
+    }
+
     try {
-      const metricsSnap = await getDocs(collection(db, 'users', uid, 'statistics', sessionId, 'tracked_metric'))
+      const metricsSnap = await getDocs(collection(db, 'users', uid, 'statistics', docId, 'tracked_metric'))
 
       const metrics = await Promise.all(
         metricsSnap.docs.map(async metricDoc => {
@@ -269,7 +365,7 @@ export function useStatistics() {
           )
 
           const setsSnap = await getDocs(
-            collection(db, 'users', uid, 'statistics', sessionId, 'tracked_metric', metricDoc.id, 'exercise_set')
+            collection(db, 'users', uid, 'statistics', docId, 'tracked_metric', metricDoc.id, 'exercise_set')
           )
 
           const sets = setsSnap.docs.map(setDoc => ({ id: setDoc.id, ...setDoc.data() }))
@@ -299,11 +395,15 @@ export function useStatistics() {
   async function updateSessionTiming(uid, sessionId, fields) {
     if (!uid || !sessionId) throw new Error('UID et sessionId requis')
 
+    const { source, docId } = parseSessionIdentifier(sessionId)
+    if (source !== 'statistics') throw new Error('Modification indisponible sur cette source de séance')
+
     const payload = {}
     if (fields.started_at !== undefined) payload.started_at = fields.started_at
     if (fields.ended_at !== undefined) payload.ended_at = fields.ended_at
 
-    await updateDoc(doc(db, 'users', uid, 'statistics', sessionId), payload)
+    await updateDoc(doc(db, 'users', uid, 'statistics', docId), payload)
+    await touchStatisticsRevision(uid)
 
     const idx = rawSessions.value.findIndex(session => session.id === sessionId)
     if (idx !== -1) {
@@ -325,21 +425,86 @@ export function useStatistics() {
 
   async function addExerciseSet(uid, sessionId, metricId, fields) {
     if (!uid || !sessionId || !metricId) throw new Error('UID, sessionId et metricId requis')
+    const { source, docId } = parseSessionIdentifier(sessionId)
+    if (source !== 'statistics') throw new Error('Modification indisponible sur cette source de séance')
     const ref = await addDoc(
-      collection(db, 'users', uid, 'statistics', sessionId, 'tracked_metric', metricId, 'exercise_set'),
+      collection(db, 'users', uid, 'statistics', docId, 'tracked_metric', metricId, 'exercise_set'),
       fields
     )
+    await touchStatisticsRevision(uid)
     return ref.id
   }
 
   async function updateExerciseSet(uid, sessionId, metricId, setId, fields) {
     if (!uid || !sessionId || !metricId || !setId) throw new Error('UID, sessionId, metricId et setId requis')
-    await updateDoc(doc(db, 'users', uid, 'statistics', sessionId, 'tracked_metric', metricId, 'exercise_set', setId), fields)
+    const { source, docId } = parseSessionIdentifier(sessionId)
+    if (source !== 'statistics') throw new Error('Modification indisponible sur cette source de séance')
+    await updateDoc(doc(db, 'users', uid, 'statistics', docId, 'tracked_metric', metricId, 'exercise_set', setId), fields)
+    await touchStatisticsRevision(uid)
   }
 
   async function deleteExerciseSet(uid, sessionId, metricId, setId) {
     if (!uid || !sessionId || !metricId || !setId) throw new Error('UID, sessionId, metricId et setId requis')
-    await deleteDoc(doc(db, 'users', uid, 'statistics', sessionId, 'tracked_metric', metricId, 'exercise_set', setId))
+    const { source, docId } = parseSessionIdentifier(sessionId)
+    if (source !== 'statistics') throw new Error('Modification indisponible sur cette source de séance')
+    await deleteDoc(doc(db, 'users', uid, 'statistics', docId, 'tracked_metric', metricId, 'exercise_set', setId))
+    await touchStatisticsRevision(uid)
+  }
+
+  async function deleteTrackedMetric(uid, sessionId, metricId) {
+    if (!uid || !sessionId || !metricId) throw new Error('UID, sessionId et metricId requis')
+
+    const { source, docId } = parseSessionIdentifier(sessionId)
+    if (source !== 'statistics') throw new Error('Suppression indisponible sur cette source de séance')
+
+    const setsCollection = collection(db, 'users', uid, 'statistics', docId, 'tracked_metric', metricId, 'exercise_set')
+    const setsSnap = await getDocs(setsCollection)
+    await Promise.all(setsSnap.docs.map(setDoc => deleteDoc(setDoc.ref)))
+
+    await deleteDoc(doc(db, 'users', uid, 'statistics', docId, 'tracked_metric', metricId))
+    await touchStatisticsRevision(uid)
+  }
+
+  async function deleteSession(uid, sessionId) {
+    if (!uid || !sessionId) throw new Error('UID et sessionId requis')
+
+    const { source, docId } = parseSessionIdentifier(sessionId)
+
+    if (source === 'statistics') {
+      const metricsSnap = await getDocs(collection(db, 'users', uid, 'statistics', docId, 'tracked_metric'))
+
+      for (const metricDoc of metricsSnap.docs) {
+        const setsSnap = await getDocs(
+          collection(db, 'users', uid, 'statistics', docId, 'tracked_metric', metricDoc.id, 'exercise_set')
+        )
+        await Promise.all(setsSnap.docs.map(setDoc => deleteDoc(setDoc.ref)))
+        await deleteDoc(metricDoc.ref)
+      }
+
+      await deleteDoc(doc(db, 'users', uid, 'statistics', docId))
+      await touchStatisticsRevision(uid)
+    } else if (source === 'sessions') {
+      const exercisesSnap = await getDocs(collection(db, 'sessions', uid, 'sessions', docId, 'exercises'))
+      await Promise.all(exercisesSnap.docs.map(exerciseDoc => deleteDoc(exerciseDoc.ref)))
+      await deleteDoc(doc(db, 'sessions', uid, 'sessions', docId))
+    } else {
+      throw new Error('Source de séance non supportée pour suppression')
+    }
+
+    removeRawSession(sessionId)
+  }
+
+  function subscribeStatisticsRevision(uid, onChange) {
+    if (!uid || typeof onChange !== 'function') return () => {}
+
+    const revisionRef = doc(db, 'users', uid, 'statistics_meta', 'cache_revision')
+    return onSnapshot(revisionRef, snapshot => {
+      const data = snapshot.data() || {}
+      onChange({
+        revision: Number(data.revision || 0),
+        updatedAt: toDate(data.updated_at)?.getTime?.() || 0,
+      })
+    })
   }
 
   return {
@@ -353,6 +518,10 @@ export function useStatistics() {
     addExerciseSet,
     updateExerciseSet,
     deleteExerciseSet,
+    deleteTrackedMetric,
+    deleteSession,
+    subscribeStatisticsRevision,
+    applyRealtimeSessionChange,
     buildTypeDistribution,
     buildPrs,
   }

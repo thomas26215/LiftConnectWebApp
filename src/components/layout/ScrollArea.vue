@@ -1,8 +1,16 @@
 <template>
-  <div class="scroll-area">
+  <div class="scroll-area" @scroll="onScroll">
     <slot />
   </div>
 </template>
+
+<script setup>
+const emit = defineEmits(['scroll'])
+
+function onScroll(event) {
+  emit('scroll', event)
+}
+</script>
 
 <style scoped>
 .scroll-area {

@@ -1,0 +1,392 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    /////////////////////////////////////////////////////////////////////
+    // 🔐 Fonctions utilitaires
+    /////////////////////////////////////////////////////////////////////
+    function isAuthenticated() {
+      return request.auth != null;
+    }
+
+    function isOwner(resource) {
+      return isAuthenticated() && resource.data.authorUid == request.auth.uid;
+    }
+
+    function isAdmin() {
+      return isAuthenticated() &&
+        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.role_id == "admin";
+    }
+
+    function isMemberOfGroup(groupId) {
+      return exists(/databases/$(database)/documents/users/$(request.auth.uid)/groups/$(groupId));
+    }
+
+    // 🆕 Rôle du user courant dans un groupe
+    function getMyGroupRole(groupId) {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)/groups/$(groupId)).data.role;
+    }
+    function isGroupOwner(groupId) {
+      return isMemberOfGroup(groupId) && getMyGroupRole(groupId) == 'owner';
+    }
+    function isGroupAdmin(groupId) {
+      return isMemberOfGroup(groupId) &&
+        (getMyGroupRole(groupId) == 'owner' || getMyGroupRole(groupId) == 'admin');
+    }
+
+
+    /////////////////////////////////////////////////////////////////////
+    // 📤 POSTS
+    /////////////////////////////////////////////////////////////////////
+    match /{path=**}/posts/{postId} {
+      allow read: if isAuthenticated();
+      allow create: if isAuthenticated() && request.auth.uid == request.resource.data.authorUid;
+      allow update: if isAuthenticated() && (
+        request.auth.uid == resource.data.authorUid || (
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['likes']) &&
+          request.resource.data.likes is list
+        )
+      );
+      allow delete: if isAuthenticated() && (
+        request.auth.uid == resource.data.authorUid || isAdmin()
+      );
+    }
+
+    match /posts/{userId} {
+      allow read: if isAuthenticated();
+
+      match /posts/{postId} {
+        allow read: if isAuthenticated();
+        allow create: if isAuthenticated() && request.auth.uid == request.resource.data.authorUid;
+        allow update: if isAuthenticated() && (
+          request.auth.uid == resource.data.authorUid || (
+            request.resource.data.diff(resource.data).affectedKeys().hasOnly(['likes']) &&
+            request.resource.data.likes is list
+          )
+        );
+        allow delete: if isAuthenticated() && (
+          request.auth.uid == resource.data.authorUid || isAdmin()
+        );
+
+        match /comments/{commentId} {
+          allow read: if isAuthenticated();
+          allow create: if isAuthenticated() && request.auth.uid == request.resource.data.authorUid;
+          allow update, delete: if isAuthenticated() && request.auth.uid == resource.data.authorUid;
+
+          match /replies/{replyId} {
+            allow read: if isAuthenticated();
+            allow create: if isAuthenticated() && request.auth.uid == request.resource.data.authorUid;
+            allow update, delete: if isAuthenticated() && request.auth.uid == resource.data.authorUid;
+          }
+        }
+      }
+    }
+
+    /////////////////////////////////////////////////////////////////////
+    // 🏋️ GYMS
+    /////////////////////////////////////////////////////////////////////
+    match /gyms/{gymId} {
+      allow read: if isAuthenticated();
+      allow write: if isAuthenticated();
+    }
+
+    /////////////////////////////////////////////////////////////////////
+    // 🔖 HASHTAGS
+    /////////////////////////////////////////////////////////////////////
+    match /hashtags/{tag} {
+      allow read, write: if isAuthenticated();
+    }
+
+    /////////////////////////////////////////////////////////////////////
+    // 👤 UTILISATEURS
+    /////////////////////////////////////////////////////////////////////
+    match /users/{userId} {
+      allow read: if isAuthenticated();
+      allow write: if isAuthenticated() && request.auth.uid == userId;
+
+      match /groups/{groupDocId} {
+        allow get, list, read: if request.auth.uid == userId;
+        allow create, update, delete, write: if request.auth.uid == userId;
+      }
+
+      match /following/{targetUserId} {
+        allow read: if true;
+        allow write: if isAuthenticated() && request.auth.uid == userId;
+      }
+
+      match /followers/{followerUserId} {
+        allow read: if isAuthenticated();
+        allow write: if true;
+      }
+
+      match /last_workouts/{workoutId} {
+        allow read: if true;
+        allow write: if isAuthenticated() && request.auth.uid == userId;
+      }
+
+      match /daily_quest/{questDocId} {
+        allow read: if isAuthenticated();
+        allow write: if isAuthenticated() && request.auth.uid == userId;
+      }
+
+      match /statistics/{statId} {
+        allow read, write: if isAuthenticated() && request.auth.uid == userId;
+
+        match /tracked_metric/{setId} {
+          allow read, write: if isAuthenticated() && request.auth.uid == userId;
+
+          match /exercise_set/{exerciseSetId} {
+            allow read, write: if isAuthenticated() && request.auth.uid == userId;
+          }
+        }
+      }
+    }
+
+    /////////////////////////////////////////////////////////////////////
+    // 🎓 RÔLES
+    /////////////////////////////////////////////////////////////////////
+    match /roles/{roleId} {
+      allow read: if true;
+    }
+
+    match /user_roles/{assignmentId} {
+      allow read: if isAuthenticated() &&
+          (resource.data.user_id == request.auth.uid || isAdmin());
+      allow write: if isAuthenticated() &&
+          (request.resource.data.user_id == request.auth.uid || isAdmin());
+    }
+
+    /////////////////////////////////////////////////////////////////////
+    // 🏋️ EXERCICES
+    /////////////////////////////////////////////////////////////////////
+    // ────── Collection plate (web: src/firebase/exercises.js) ──────
+    match /exercises/{exerciseId} {
+      allow read: if isAuthenticated();
+
+      allow create: if isAuthenticated() &&
+        request.resource.data.author_uid == request.auth.uid;
+
+      allow update, delete: if isAuthenticated() &&
+        resource.data.author_uid == request.auth.uid;
+
+      match /groups/{groupId} {
+        allow read: if isAuthenticated();
+        allow write: if isAuthenticated() &&
+          get(/databases/$(database)/documents/exercises/$(exerciseId)).data.author_uid == request.auth.uid;
+      }
+
+      match /substitutions/{substitutionId} {
+        allow read: if true;
+        allow write: if isAuthenticated() &&
+          get(/databases/$(database)/documents/exercises/$(exerciseId)).data.author_uid == request.auth.uid;
+      }
+    }
+
+    // ────── Collection imbriquée (Dart mobile: exercises/{userId}/exercises/{exerciseId}) ──────
+    match /exercises/{userId} {
+      allow read: if isAuthenticated() && request.auth.uid == userId;
+      allow write: if isAuthenticated() && request.auth.uid == userId;
+
+      match /exercises/{exerciseId} {
+        allow read: if isAuthenticated() && request.auth.uid == userId;
+        allow create: if isAuthenticated() && request.auth.uid == userId;
+        allow update, delete: if isAuthenticated() && request.auth.uid == userId;
+
+        match /groups/{groupId} {
+          allow read: if isAuthenticated();
+          allow write: if isAuthenticated() && request.auth.uid == userId;
+        }
+
+        match /substitutions/{substitutionId} {
+          allow read: if true;
+          allow write: if isAuthenticated() && request.auth.uid == userId;
+        }
+      }
+    }
+
+    /////////////////////////////////////////////////////////////////////
+    // 💪 WORKOUTS / ENTRAÎNEMENTS CRÉÉS
+    /////////////////////////////////////////////////////////////////////
+    // ────── Collection plate (anciennes données) ──────
+    match /workouts/{workoutId} {
+      allow read: if isAuthenticated();
+      allow create: if isAuthenticated() &&
+        request.resource.data.author_uid == request.auth.uid;
+      allow update, delete: if isAuthenticated() &&
+        resource.data.author_uid == request.auth.uid;
+    }
+
+    // ────── Collection imbriquée (Dart mobile + Future web) ──────
+    match /workouts/{userId} {
+      allow read: if isAuthenticated();
+
+      match /workouts/{workoutId} {
+        allow read: if isAuthenticated();
+        allow create: if isAuthenticated() && request.auth.uid == userId;
+        allow update, delete: if isAuthenticated() && request.auth.uid == userId;
+      }
+    }
+
+    /////////////////////////////////////////////////////////////////////
+    // 📆 SESSIONS D'ENTRAÎNEMENT
+    /////////////////////////////////////////////////////////////////////
+    match /{path=**}/sessions/{sessionId} {
+      allow read: if true;
+      allow write: if true;
+
+      match /exercises/{exerciseId} {
+        allow read, write: if true;
+      }
+
+      match /session_exercises/{exerciseId} {
+        allow read, write: if true;
+      }
+    }
+
+    match /sessions/{userId} {
+      allow read: if true;
+
+      match /sessions/{sessionId} {
+        allow read, write: if true;
+
+        match /exercises/{exerciseId} {
+          allow read, write: if true;
+        }
+
+        match /session_exercises/{exerciseId} {
+          allow read, write: if true;
+        }
+      }
+    }
+
+    /////////////////////////////////////////////////////////////////////
+    // 🔥 GROUPES SPORTIFS
+    /////////////////////////////////////////////////////////////////////
+    match /groups/{groupId} {
+      // Lecture : groupe public ou membre
+      allow read: if isAuthenticated() &&
+        (resource.data.isPrivate == false || isMemberOfGroup(groupId));
+
+      // Création : tout utilisateur connecté
+      allow create: if isAuthenticated();
+
+      // Suppression : propriétaire uniquement
+      allow delete: if isAuthenticated() && isGroupOwner(groupId);
+
+      // Mise à jour : propriétaire (tout) OU changement de membersCount de ±1
+      allow update: if isAuthenticated() && (
+        isGroupOwner(groupId) ||
+        (
+          request.resource.data.diff(resource.data).affectedKeys().hasOnly(['membersCount']) &&
+          (request.resource.data.membersCount == resource.data.membersCount + 1 ||
+           request.resource.data.membersCount == resource.data.membersCount - 1)
+        )
+      );
+
+      // ── Membres ────────────────────────────────────────────────────
+      match /members/{memberId} {
+        allow read: if isAuthenticated() && isMemberOfGroup(groupId);
+        // Join (son propre doc) OU admin/owner
+        allow create: if isAuthenticated() &&
+          (request.auth.uid == memberId || isGroupAdmin(groupId));
+        // Changement de rôle : admin/owner uniquement
+        allow update: if isAuthenticated() && isGroupAdmin(groupId);
+        // Leave (son propre doc) OU admin/owner kick
+        allow delete: if isAuthenticated() &&
+          (request.auth.uid == memberId || isGroupAdmin(groupId));
+      }
+
+      // ── Exercices du groupe ────────────────────────────────────────
+      match /exercises/{exerciseId} {
+        allow read: if isAuthenticated() && isMemberOfGroup(groupId);
+        allow create: if isAuthenticated() && isMemberOfGroup(groupId);
+        allow update, delete: if isAuthenticated() &&
+          (resource.data.addedByUid == request.auth.uid || isGroupAdmin(groupId));
+      }
+
+      // ── Entraînements ──────────────────────────────────────────────
+      match /sessions/{sessionId} {
+        allow read: if isAuthenticated() && isMemberOfGroup(groupId);
+        allow create: if isAuthenticated() && isMemberOfGroup(groupId);
+        // Auteur/owner = tout modifier ; membre = compteurs de participation uniquement
+        allow update: if isAuthenticated() && (
+          resource.data.authorUid == request.auth.uid ||
+          isGroupOwner(groupId) ||
+          (
+            isMemberOfGroup(groupId) &&
+            request.resource.data.diff(resource.data).affectedKeys()
+              .hasOnly(['attendingCount', 'notAttendingCount', 'undecidedCount'])
+          )
+        );
+        allow delete: if isAuthenticated() &&
+          (resource.data.authorUid == request.auth.uid || isGroupOwner(groupId));
+
+        // ── Participation ─────────────────────────────────────────
+        match /attending/{uid} {
+          allow read: if isAuthenticated() && isMemberOfGroup(groupId);
+          allow create, update: if isAuthenticated() && request.auth.uid == uid && isMemberOfGroup(groupId);
+          allow delete: if isAuthenticated() && request.auth.uid == uid;
+        }
+        match /notAttending/{uid} {
+          allow read: if isAuthenticated() && isMemberOfGroup(groupId);
+          allow create, update: if isAuthenticated() && request.auth.uid == uid && isMemberOfGroup(groupId);
+          allow delete: if isAuthenticated() && request.auth.uid == uid;
+        }
+        match /undecided/{uid} {
+          allow read: if isAuthenticated() && isMemberOfGroup(groupId);
+          allow create, update: if isAuthenticated() && request.auth.uid == uid && isMemberOfGroup(groupId);
+          allow delete: if isAuthenticated() && request.auth.uid == uid;
+        }
+      }
+    }
+
+    /////////////////////////////////////////////////////////////////////
+    // 💬 VERSIONS
+    /////////////////////////////////////////////////////////////////////
+    match /versions/{versionId} {
+      allow read: if true;
+      allow write: if false;
+    }
+
+    /////////////////////////////////////////////////////////////////////
+    // 💬 FEEDBACKS
+    /////////////////////////////////////////////////////////////////////
+    match /feedbacks/{feedbackId} {
+      allow read: if isAuthenticated() && (
+        resource.data.uid == request.auth.uid ||
+        isAdmin()
+      );
+      allow create: if isAuthenticated() && request.resource.data.uid == request.auth.uid;
+      allow update: if isAuthenticated() && (
+        resource.data.uid == request.auth.uid || isAdmin()
+      );
+      allow delete: if isAuthenticated() && (
+        resource.data.uid == request.auth.uid || isAdmin()
+      );
+    }
+
+    /////////////////////////////////////////////////////////////////////
+    // 🔁 EXERCICES D'UNE SESSION (GLOBAL)
+    /////////////////////////////////////////////////////////////////////
+    match /session_exercises/{sessExId} {
+      allow read, write: if isAuthenticated();
+
+      match /exercises/{exerciseId} {
+        allow read, write: if isAuthenticated();
+      }
+    }
+
+    match /notice/{noticeId} {
+      allow read: if true;
+      allow create: if true;
+      allow update: if request.auth != null;
+      allow delete: if request.auth != null;
+
+      match /replies/{replyId} {
+        allow read: if true;
+        allow create: if true;
+        allow delete: if request.auth != null;
+      }
+    }
+  }
+}

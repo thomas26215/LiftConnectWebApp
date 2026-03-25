@@ -1,6 +1,6 @@
 <template>
   <div class="view-wrapper">
-    <PageHeader title="Tableau de bord" subtitle="dimanche 15 mars 2026">
+    <PageHeader title="Tableau de bord" :subtitle="subtitle">
       <template #actions>
         <RouterLink to="/entrainements" class="btn-primary">+ Nouvel entraînement</RouterLink>
       </template>
@@ -114,16 +114,223 @@
 </template>
 
 <script setup>
-import { computed } from 'vue'
+import { computed, watch } from 'vue'
+import { collection, limit, onSnapshot, query } from 'firebase/firestore'
 import PageHeader   from '@/components/layout/PageHeader.vue'
 import ScrollArea   from '@/components/layout/ScrollArea.vue'
 import SectionHeader from '@/components/ui/SectionHeader.vue'
 import WorkoutCard  from '@/components/ui/WorkoutCard.vue'
 import { useWorkoutsStore } from '@/stores/workouts'
-import { dashboardStats, weekDays, quickActions, miniStats } from '@/data'
+import { useAuthStore } from '@/stores/auth'
+import { db } from '@/firebase'
+import { quickActions, typeLabels } from '@/data'
 
 const workoutsStore = useWorkoutsStore()
-const recentWorkouts = computed(() => workoutsStore.workouts.slice(0, 4))
+const authStore = useAuthStore()
+
+const subtitle = computed(() => new Date().toLocaleDateString('fr-FR', {
+  weekday: 'long',
+  day: 'numeric',
+  month: 'long',
+  year: 'numeric',
+}))
+
+function toDate(value) {
+  if (!value) return null
+  if (value instanceof Date) return value
+  const parsed = new Date(value)
+  return Number.isNaN(parsed.getTime()) ? null : parsed
+}
+
+function formatHours(minutes) {
+  const total = Math.max(0, Number(minutes || 0))
+  if (!total) return '0h'
+  const hours = Math.floor(total / 60)
+  const rest = total % 60
+  if (!hours) return `${rest} min`
+  return rest ? `${hours}h${rest}` : `${hours}h`
+}
+
+function startOfDay(date) {
+  return new Date(date.getFullYear(), date.getMonth(), date.getDate())
+}
+
+function keyOfDay(date) {
+  const d = startOfDay(date)
+  return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`
+}
+
+function startOfWeekMonday(date) {
+  const d = startOfDay(date)
+  const day = d.getDay()
+  const diff = day === 0 ? -6 : 1 - day
+  d.setDate(d.getDate() + diff)
+  return d
+}
+
+const workoutsSorted = computed(() => {
+  return [...workoutsStore.workouts].sort((a, b) => {
+    const bt = toDate(b.createdAt)?.getTime?.() || 0
+    const at = toDate(a.createdAt)?.getTime?.() || 0
+    return bt - at
+  })
+})
+
+const recentWorkouts = computed(() => workoutsSorted.value.slice(0, 4))
+
+const workoutDates = computed(() =>
+  workoutsSorted.value
+    .map(workout => toDate(workout.createdAt))
+    .filter(Boolean)
+)
+
+const thisWeekWorkouts = computed(() => {
+  const start = startOfWeekMonday(new Date()).getTime()
+  return workoutsSorted.value.filter(workout => {
+    const time = toDate(workout.createdAt)?.getTime?.()
+    return time && time >= start
+  })
+})
+
+const totalMinutes = computed(() => workoutsSorted.value.reduce((sum, workout) => sum + Number(workout.duration || 0), 0))
+const weekMinutes = computed(() => thisWeekWorkouts.value.reduce((sum, workout) => sum + Number(workout.duration || 0), 0))
+const totalExercises = computed(() => workoutsSorted.value.reduce((sum, workout) => sum + Number(workout.exercises || 0), 0))
+
+const streakDays = computed(() => {
+  const keys = new Set(workoutDates.value.map(keyOfDay))
+  if (!keys.size) return 0
+
+  let streak = 0
+  let cursor = startOfDay(new Date())
+  while (keys.has(keyOfDay(cursor))) {
+    streak += 1
+    cursor.setDate(cursor.getDate() - 1)
+  }
+  return streak
+})
+
+const dashboardStats = computed(() => [
+  { value: `${workoutsSorted.value.length}`, label: 'Total entraînements', sub: 'au total', icon: '📈', color: '#baf2d8' },
+  { value: `${thisWeekWorkouts.value.length}`, label: 'Cette semaine', sub: `${weekMinutes.value} minutes`, icon: '🗓', color: '#60a5fa' },
+  { value: formatHours(totalMinutes.value), label: 'Temps total', sub: `${totalMinutes.value} minutes`, icon: '⏱', color: '#f97316' },
+  { value: `${totalExercises.value}`, label: 'Exercices', sub: 'réalisés', icon: '🏋️', color: '#a78bfa' },
+  { value: `${streakDays.value}`, label: 'Série', sub: 'jours consécutifs', icon: '🔥', color: '#fbbf24' },
+])
+
+const weekDays = computed(() => {
+  const today = startOfDay(new Date())
+  const start = new Date(today)
+  start.setDate(today.getDate() - 6)
+
+  const daysWithWorkout = new Set(workoutDates.value.map(keyOfDay))
+
+  return Array.from({ length: 7 }, (_, index) => {
+    const current = new Date(start)
+    current.setDate(start.getDate() + index)
+
+    return {
+      name: current.toLocaleDateString('fr-FR', { weekday: 'short' }).replace('.', ''),
+      date: current.toLocaleDateString('fr-FR', { day: 'numeric', month: 'short' }),
+      hasWorkout: daysWithWorkout.has(keyOfDay(current)),
+      today: keyOfDay(current) === keyOfDay(today),
+    }
+  })
+})
+
+const monthlyCount = computed(() => {
+  const now = new Date()
+  return workoutsSorted.value.filter(workout => {
+    const date = toDate(workout.createdAt)
+    return date && date.getMonth() === now.getMonth() && date.getFullYear() === now.getFullYear()
+  }).length
+})
+
+const favoriteType = computed(() => {
+  const counts = new Map()
+
+  workoutsSorted.value.forEach(workout => {
+    const type = String(workout.type || '').trim() || 'full'
+    counts.set(type, (counts.get(type) || 0) + 1)
+  })
+
+  let selected = 'full'
+  let max = 0
+  counts.forEach((count, type) => {
+    if (count > max) {
+      max = count
+      selected = type
+    }
+  })
+
+  return typeLabels[selected] || '—'
+})
+
+const bestWeekCount = computed(() => {
+  const weeklyCounts = new Map()
+
+  workoutDates.value.forEach(date => {
+    const start = startOfWeekMonday(date)
+    const key = `${start.getFullYear()}-${start.getMonth()}-${start.getDate()}`
+    weeklyCounts.set(key, (weeklyCounts.get(key) || 0) + 1)
+  })
+
+  return Math.max(...weeklyCounts.values(), 0)
+})
+
+const averageDuration = computed(() => {
+  if (!workoutsSorted.value.length) return 0
+  return Math.round(totalMinutes.value / workoutsSorted.value.length)
+})
+
+const miniStats = computed(() => [
+  { label: 'Durée moyenne', value: `${averageDuration.value} min` },
+  { label: 'Ce mois-ci', value: `${monthlyCount.value} séances` },
+  { label: 'Type favori', value: favoriteType.value, highlight: true },
+  { label: 'Meilleure semaine', value: `${bestWeekCount.value} séances` },
+])
+
+watch(
+  () => authStore.user?.uid,
+  (uid, _oldUid, onCleanup) => {
+    workoutsStore.loadWorkouts(uid)
+
+    if (!uid) return
+
+    let initialized = false
+    const unsubscribeSessions = onSnapshot(
+      query(collection(db, 'sessions', uid, 'sessions'), limit(1)),
+      snapshot => {
+        if (!initialized) {
+          initialized = true
+          return
+        }
+        snapshot.docChanges().forEach(change => {
+          workoutsStore.applyRealtimeSessionChange(change, 'sessions')
+        })
+      }
+    )
+
+    let initializedStats = false
+    const unsubscribeStatistics = onSnapshot(
+      query(collection(db, 'users', uid, 'statistics'), limit(1)),
+      snapshot => {
+        if (!initializedStats) {
+          initializedStats = true
+          return
+        }
+        snapshot.docChanges().forEach(change => {
+          workoutsStore.applyRealtimeSessionChange(change, 'statistics')
+        })
+      }
+    )
+
+    onCleanup(() => {
+      unsubscribeSessions()
+      unsubscribeStatistics()
+    })
+  },
+  { immediate: true }
+)
 </script>
 
 <style scoped>
