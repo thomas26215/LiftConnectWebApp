@@ -8,6 +8,7 @@
           <option value="7d">Cette semaine</option>
           <option value="365d">Cette année</option>
         </select>
+        <button type="button" class="btn-primary" @click="openCreateModal">✚ Nouvelle séance</button>
       </template>
     </PageHeader>
 
@@ -293,6 +294,65 @@
       </div>
       </template>
     </ScrollArea>
+
+    <!-- Modal pour créer une nouvelle séance -->
+    <div v-if="isCreateModalOpen" class="modal-overlay" @click="closeCreateModal">
+      <div class="modal-dialog" @click.stop>
+        <div class="modal-header">
+          <h2 class="modal-title">Nouvelle séance</h2>
+          <button type="button" class="modal-close" @click="closeCreateModal">✕</button>
+        </div>
+
+        <div class="modal-body">
+          <div v-if="createFormError" class="form-error">{{ createFormError }}</div>
+
+          <label class="form-field">
+            <span class="form-label">Nom de la séance</span>
+            <input
+              v-model="createFormData.name"
+              type="text"
+              class="form-input"
+              placeholder="ex: Push Day"
+              :disabled="isCreatingSession"
+            />
+          </label>
+
+          <label class="form-field">
+            <span class="form-label">Date et heure de début</span>
+            <input
+              v-model="createFormData.startedAt"
+              type="datetime-local"
+              class="form-input"
+              :disabled="isCreatingSession"
+            />
+          </label>
+
+          <label class="form-field">
+            <span class="form-label">Date et heure de fin</span>
+            <input
+              v-model="createFormData.endedAt"
+              type="datetime-local"
+              class="form-input"
+              :disabled="isCreatingSession"
+            />
+          </label>
+        </div>
+
+        <div class="modal-footer">
+          <button type="button" class="btn-secondary" @click="closeCreateModal" :disabled="isCreatingSession">
+            Annuler
+          </button>
+          <button
+            type="button"
+            class="btn-primary"
+            @click="handleCreateSession"
+            :disabled="isCreatingSession"
+          >
+            {{ isCreatingSession ? 'Création en cours…' : 'Créer la séance' }}
+          </button>
+        </div>
+      </div>
+    </div>
   </div>
 </template>
 
@@ -318,6 +378,7 @@ const {
   deleteExerciseSet,
   deleteTrackedMetric,
   deleteSession,
+  createSession,
   subscribeStatisticsRevision,
   applyRealtimeSessionChange,
   buildTypeDistribution,
@@ -343,6 +404,16 @@ const volumeSeriesVisibility = ref({
   duration: true,
 })
 
+// Modal pour créer une nouvelle séance
+const isCreateModalOpen = ref(false)
+const isCreatingSession = ref(false)
+const createFormData = ref({
+  name: '',
+  startedAt: '',
+  endedAt: '',
+})
+const createFormError = ref(null)
+
 function toggleVolumeSeries(seriesKey) {
   const visibility = volumeSeriesVisibility.value
   const activeCount = Object.values(visibility).filter(Boolean).length
@@ -357,6 +428,61 @@ function toggleVolumeSeries(seriesKey) {
 const weeklyVisibleSeriesCount = computed(() =>
   Math.max(1, Object.values(volumeSeriesVisibility.value).filter(Boolean).length)
 )
+
+function openCreateModal() {
+  const now = new Date()
+  const startTime = new Date(now.getTime() - 60 * 60000) // 1 heure avant maintenant
+  const endTime = new Date(now.getTime())
+
+  createFormData.value = {
+    name: '',
+    startedAt: startTime.toISOString().slice(0, 16),
+    endedAt: endTime.toISOString().slice(0, 16),
+  }
+  createFormError.value = null
+  isCreateModalOpen.value = true
+}
+
+function closeCreateModal() {
+  isCreateModalOpen.value = false
+  createFormError.value = null
+}
+
+async function handleCreateSession() {
+  createFormError.value = null
+
+  try {
+    const form = createFormData.value
+    if (!form.name.trim()) {
+      createFormError.value = 'Veuillez entrer un nom pour la séance'
+      return
+    }
+
+    const startedAt = new Date(form.startedAt)
+    const endedAt = new Date(form.endedAt)
+
+    if (!startedAt.getTime() || !endedAt.getTime()) {
+      createFormError.value = 'Veuillez fournir des dates valides'
+      return
+    }
+
+    if (endedAt <= startedAt) {
+      createFormError.value = 'L\'heure de fin doit être après l\'heure de début'
+      return
+    }
+
+    isCreatingSession.value = true
+    const newSession = await createSession(authStore.user.uid, form.name.trim(), startedAt, endedAt)
+    selectedSessionId.value = newSession.id
+    selectedSessionDetail.value = newSession
+    closeCreateModal()
+  } catch (e) {
+    console.error('Erreur lors de la création de la séance:', e)
+    createFormError.value = e.message || 'Impossible de créer la séance'
+  } finally {
+    isCreatingSession.value = false
+  }
+}
 
 const rangeLabel = computed(() => {
   if (selectedRange.value === '7d') return 'Cette semaine'
@@ -1763,6 +1889,189 @@ watch(() => authStore.user?.uid, (uid, _oldUid, onCleanup) => {
 
   .month-meta {
     text-align: left;
+  }
+}
+
+/* Modal Styles */
+.modal-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  backdrop-filter: blur(4px);
+}
+
+.modal-dialog {
+  background: var(--color-background);
+  border-radius: 12px;
+  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
+  max-width: 500px;
+  width: 90%;
+  max-height: 90vh;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  animation: slide-up 0.3s ease-out;
+}
+
+.modal-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 20px 24px;
+  border-bottom: 1px solid var(--color-border);
+  flex-shrink: 0;
+}
+
+.modal-title {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 600;
+  color: var(--color-text);
+}
+
+.modal-close {
+  background: none;
+  border: none;
+  font-size: 20px;
+  cursor: pointer;
+  color: var(--color-text-secondary);
+  transition: color 0.2s;
+}
+
+.modal-close:hover {
+  color: var(--color-text);
+}
+
+.modal-body {
+  padding: 24px;
+  flex: 1;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.form-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.form-label {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--color-text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+
+.form-input {
+  padding: 10px 12px;
+  border: 1px solid var(--color-border);
+  border-radius: 6px;
+  font-size: 14px;
+  background: var(--color-input-bg);
+  color: var(--color-text);
+  font-family: inherit;
+  transition: border-color 0.2s, box-shadow 0.2s;
+}
+
+.form-input:focus {
+  outline: none;
+  border-color: var(--color-primary);
+  box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
+}
+
+.form-input:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.form-error {
+  background: rgba(239, 68, 68, 0.1);
+  border: 1px solid rgb(239, 68, 68);
+  border-radius: 6px;
+  padding: 10px 12px;
+  color: rgb(239, 68, 68);
+  font-size: 13px;
+}
+
+.modal-footer {
+  display: flex;
+  gap: 12px;
+  justify-content: flex-end;
+  padding: 16px 24px;
+  border-top: 1px solid var(--color-border);
+  flex-shrink: 0;
+}
+
+.btn-primary,
+.btn-secondary {
+  padding: 10px 16px;
+  border-radius: 6px;
+  font-size: 14px;
+  font-weight: 500;
+  border: none;
+  cursor: pointer;
+  transition: all 0.2s;
+  white-space: nowrap;
+}
+
+.btn-primary {
+  background: var(--color-primary);
+  color: white;
+  box-shadow: 0 4px 12px rgba(59, 130, 246, 0.3);
+}
+
+.btn-primary:hover:not(:disabled) {
+  background: var(--color-primary-hover);
+  box-shadow: 0 6px 16px rgba(59, 130, 246, 0.4);
+  transform: translateY(-1px);
+}
+
+.btn-primary:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.btn-secondary {
+  background: var(--color-surface);
+  color: var(--color-text);
+  border: 1px solid var(--color-border);
+}
+
+.btn-secondary:hover:not(:disabled) {
+  background: var(--color-surface-hover);
+}
+
+.btn-secondary:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Responsive */
+@media (max-width: 640px) {
+  .modal-dialog {
+    width: 95%;
+  }
+
+  .modal-body {
+    padding: 16px;
+  }
+
+  .modal-footer {
+    flex-direction: column-reverse;
+  }
+
+  .modal-footer button {
+    width: 100%;
   }
 }
 </style>

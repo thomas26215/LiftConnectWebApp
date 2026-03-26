@@ -10,6 +10,7 @@ import {
   onAuthStateChanged,
 } from 'firebase/auth'
 import { auth, googleProvider } from '@/firebase'
+import { registerDevice, clearDeviceId } from '@/firebase/syncQueue'
 
 export const useAuthStore = defineStore('auth', () => {
   const user    = ref(null)
@@ -53,6 +54,9 @@ export const useAuthStore = defineStore('auth', () => {
     try {
       const { user: u } = await signInWithEmailAndPassword(auth, email, password)
       user.value = u
+      // Register device for cross-device sync
+      await registerDevice(u.uid)
+      console.log(`✅ Device registered for user ${u.uid}`)
     } catch (e) {
       error.value = formatError(e.code)
       throw e
@@ -65,6 +69,9 @@ export const useAuthStore = defineStore('auth', () => {
     try {
       const { user: u } = await signInWithPopup(auth, googleProvider)
       user.value = u
+      // Register device for cross-device sync
+      await registerDevice(u.uid)
+      console.log(`✅ Device registered for user ${u.uid}`)
     } catch (e) {
       error.value = formatError(e.code)
       throw e
@@ -84,6 +91,9 @@ export const useAuthStore = defineStore('auth', () => {
 
   // ── Déconnexion ──────────────────────────────────────────────
   async function logout() {
+    // Clear device ID from localStorage before signing out
+    clearDeviceId()
+    console.log('✅ Device ID cleared')
     await signOut(auth)
     user.value = null
   }

@@ -14,6 +14,7 @@ import {
   onSnapshot,
 } from 'firebase/firestore'
 import { db } from '@/firebase'
+import { logStatisticCreate, logStatisticUpdate, logStatisticDelete, logStatisticCascadeDelete } from '@/firebase/statisticsSync'
 
 const DISTRIBUTION_COLORS = ['#f97316', '#60a5fa', '#a78bfa', '#34d399', '#fbbf24', '#fb7185']
 const CACHE_TTL_MS = 5 * 60 * 1000
@@ -404,6 +405,8 @@ export function useStatistics() {
 
     await updateDoc(doc(db, 'users', uid, 'statistics', docId), payload)
     await touchStatisticsRevision(uid)
+    // Log to sync_queue for cross-device synchronization
+    await logStatisticUpdate(uid, docId, 'statistic')
 
     const idx = rawSessions.value.findIndex(session => session.id === sessionId)
     if (idx !== -1) {
@@ -432,6 +435,8 @@ export function useStatistics() {
       fields
     )
     await touchStatisticsRevision(uid)
+    // Log to sync_queue for cross-device synchronization
+    await logStatisticCreate(uid, docId, 'exercise_set', metricId)
     return ref.id
   }
 
@@ -441,6 +446,8 @@ export function useStatistics() {
     if (source !== 'statistics') throw new Error('Modification indisponible sur cette source de séance')
     await updateDoc(doc(db, 'users', uid, 'statistics', docId, 'tracked_metric', metricId, 'exercise_set', setId), fields)
     await touchStatisticsRevision(uid)
+    // Log to sync_queue for cross-device synchronization
+    await logStatisticUpdate(uid, docId, 'exercise_set', metricId)
   }
 
   async function deleteExerciseSet(uid, sessionId, metricId, setId) {
@@ -449,6 +456,8 @@ export function useStatistics() {
     if (source !== 'statistics') throw new Error('Modification indisponible sur cette source de séance')
     await deleteDoc(doc(db, 'users', uid, 'statistics', docId, 'tracked_metric', metricId, 'exercise_set', setId))
     await touchStatisticsRevision(uid)
+    // Log to sync_queue for cross-device synchronization
+    await logStatisticDelete(uid, docId, 'exercise_set', metricId)
   }
 
   async function deleteTrackedMetric(uid, sessionId, metricId) {
@@ -463,6 +472,8 @@ export function useStatistics() {
 
     await deleteDoc(doc(db, 'users', uid, 'statistics', docId, 'tracked_metric', metricId))
     await touchStatisticsRevision(uid)
+    // Log to sync_queue for cross-device synchronization
+    await logStatisticDelete(uid, docId, 'tracked_metric', metricId)
   }
 
   async function deleteSession(uid, sessionId) {
@@ -483,6 +494,8 @@ export function useStatistics() {
 
       await deleteDoc(doc(db, 'users', uid, 'statistics', docId))
       await touchStatisticsRevision(uid)
+      // Log cascade delete to sync_queue for cross-device synchronization
+      await logStatisticCascadeDelete(uid, docId)
     } else if (source === 'sessions') {
       const exercisesSnap = await getDocs(collection(db, 'sessions', uid, 'sessions', docId, 'exercises'))
       await Promise.all(exercisesSnap.docs.map(exerciseDoc => deleteDoc(exerciseDoc.ref)))
@@ -507,6 +520,54 @@ export function useStatistics() {
     })
   }
 
+  async function createSession(uid, name, startedAt, endedAt) {
+    if (!uid) throw new Error('UID requis')
+    if (!name || name.trim() === '') throw new Error('Le nom de la séance est requis')
+    if (!startedAt || !(startedAt instanceof Date)) throw new Error('Date de début invalide')
+    if (!endedAt || !(endedAt instanceof Date)) throw new Error('Date de fin invalide')
+    if (endedAt <= startedAt) throw new Error('La date de fin doit être après la date de début')
+
+    try {
+      const durationMinutes = Math.round((endedAt.getTime() - startedAt.getTime()) / 60000)
+      
+      const sessionDocRef = await addDoc(collection(db, 'users', uid, 'statistics'), {
+        session_name: name.trim(),
+        name: name.trim(),
+        started_at: startedAt,
+        ended_at: endedAt,
+        duration_minutes: durationMinutes,
+        duration: durationMinutes,
+        created_at: serverTimestamp(),
+        updated_at: serverTimestamp(),
+      })
+
+      await touchStatisticsRevision(uid)
+
+      // Log to sync_queue for cross-device synchronization
+      await logStatisticCreate(uid, sessionDocRef.id, 'session')
+
+      // Build and return the new session
+      const newSession = {
+        id: `statistics:${sessionDocRef.id}`,
+        source: 'statistics',
+        sourceId: sessionDocRef.id,
+        name: name.trim(),
+        startedAt,
+        endedAt,
+        durationMinutes,
+        metrics: [],
+      }
+
+      upsertRawSession(newSession)
+
+      console.log(`✅ Nouvelle séance créée: ${name} (${durationMinutes}m)`)
+      return newSession
+    } catch (e) {
+      console.error('[useStatistics] createSession error:', e)
+      throw e
+    }
+  }
+
   return {
     rawSessions,
     loading,
@@ -520,6 +581,7 @@ export function useStatistics() {
     deleteExerciseSet,
     deleteTrackedMetric,
     deleteSession,
+    createSession,
     subscribeStatisticsRevision,
     applyRealtimeSessionChange,
     buildTypeDistribution,
