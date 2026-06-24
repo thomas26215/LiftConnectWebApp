@@ -79,44 +79,80 @@
           </div>
         </div>
 
-        <!-- Durée moyenne -->
+        <!-- Durée des séances - Triple graphe -->
         <div class="chart-card animate-in delay-2">
           <div class="chart-title">Durée des séances</div>
           <div class="chart-sub">{{ durationSubtitle }}</div>
-          <div class="chart-shell">
-            <div class="chart-y-labels">
-              <span>{{ durationScaleLabels[0] }} min</span>
-              <span>{{ durationScaleLabels[1] }} min</span>
-              <span>{{ durationScaleLabels[2] }} min</span>
-            </div>
-            <div class="line-chart">
-              <svg viewBox="0 0 260 80" preserveAspectRatio="none">
+          <div class="chart-legend-triple">
+            <button type="button" class="legend-chip avg" :class="{ inactive: !tripleSeriesVisibility.avg }" @click="toggleTripleSeries('avg')">Durée moyenne</button>
+            <button type="button" class="legend-chip total" :class="{ inactive: !tripleSeriesVisibility.total }" @click="toggleTripleSeries('total')">Temps total</button>
+            <button type="button" class="legend-chip count" :class="{ inactive: !tripleSeriesVisibility.count }" @click="toggleTripleSeries('count')">Nombre de séances</button>
+          </div>
+          <div class="chart-shell triple-no-labels">
+            <div class="line-chart triple">
+              <svg viewBox="0 0 260 80" preserveAspectRatio="none"
+                @mousemove="handleTripleGraphMouseMove"
+                @mouseleave="handleTripleGraphMouseLeave">
                 <defs>
-                  <linearGradient id="line-fill" x1="0" y1="0" x2="0" y2="1">
+                  <linearGradient id="avg-fill" x1="0" y1="0" x2="0" y2="1">
                     <stop offset="0%" stop-color="rgba(186,242,216,0.18)"/>
                     <stop offset="100%" stop-color="rgba(186,242,216,0)"/>
+                  </linearGradient>
+                  <linearGradient id="total-fill" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="0%" stop-color="rgba(96,165,250,0.18)"/>
+                    <stop offset="100%" stop-color="rgba(96,165,250,0)"/>
+                  </linearGradient>
+                  <linearGradient id="count-fill" x1="0" y1="0" x2="0" y2="1">
+                    <stop offset="0%" stop-color="rgba(251,146,60,0.18)"/>
+                    <stop offset="100%" stop-color="rgba(251,146,60,0)"/>
                   </linearGradient>
                 </defs>
                 <line x1="0" y1="20" x2="260" y2="20" class="svg-grid-line" />
                 <line x1="0" y1="42" x2="260" y2="42" class="svg-grid-line" />
                 <line x1="0" y1="65" x2="260" y2="65" class="svg-grid-line" />
-                <polygon :points="lineAreaPoints" fill="url(#line-fill)"/>
-                <polyline :points="linePoints"
+                
+                <!-- Average duration -->
+                <polygon v-if="tripleSeriesVisibility.avg" :points="tripleAreaPointsAvg" fill="url(#avg-fill)"/>
+                <polyline v-if="tripleSeriesVisibility.avg" :points="triplePointsAvg"
                   fill="none" stroke="rgba(186,242,216,0.78)" stroke-width="2.4"
                   stroke-linecap="round" stroke-linejoin="round"/>
-                <circle
-                  v-for="(point, idx) in linePointsMeta"
-                  :key="idx"
-                  :cx="point.x"
-                  :cy="point.y"
-                  :r="idx === linePointsMeta.length - 1 ? 4 : 2.6"
-                  :class="idx === linePointsMeta.length - 1 ? 'line-point-active' : 'line-point'"
-                >
-                  <title>{{ durationSeries[idx] }} min</title>
-                </circle>
+                
+                <!-- Total duration -->
+                <polygon v-if="tripleSeriesVisibility.total" :points="tripleAreaPointsTotal" fill="url(#total-fill)"/>
+                <polyline v-if="tripleSeriesVisibility.total" :points="triplePointsTotal"
+                  fill="none" stroke="rgba(96,165,250,0.78)" stroke-width="2.4"
+                  stroke-linecap="round" stroke-linejoin="round"/>
+                
+                <!-- Session count -->
+                <polygon v-if="tripleSeriesVisibility.count" :points="tripleAreaPointsCount" fill="url(#count-fill)"/>
+                <polyline v-if="tripleSeriesVisibility.count" :points="triplePointsCount"
+                  fill="none" stroke="rgba(251,146,60,0.78)" stroke-width="2.4"
+                  stroke-linecap="round" stroke-linejoin="round"/>
+                
+                <!-- Hover indicator line -->
+                <line v-if="hoveredTripleData" :x1="hoveredTripleData.x" :y1="0" :x2="hoveredTripleData.x" :y2="80" 
+                  class="hover-indicator-line" />
               </svg>
               <div class="line-x-labels">
                 <span v-for="label in durationXAxisLabels" :key="label">{{ label }}</span>
+              </div>
+              <!-- Hover tooltip -->
+              <div v-if="hoveredTripleData" class="triple-hover-tooltip">
+                <div class="tooltip-label">{{ hoveredTripleData.label }}</div>
+                <div class="tooltip-values">
+                  <div v-if="tripleSeriesVisibility.avg" class="tooltip-row avg">
+                    <span class="tooltip-name">Durée moy.</span>
+                    <span class="tooltip-value">{{ hoveredTripleData.avg }} min</span>
+                  </div>
+                  <div v-if="tripleSeriesVisibility.total" class="tooltip-row total">
+                    <span class="tooltip-name">Temps total</span>
+                    <span class="tooltip-value">{{ hoveredTripleData.total }} min</span>
+                  </div>
+                  <div v-if="tripleSeriesVisibility.count" class="tooltip-row count">
+                    <span class="tooltip-name">Séances</span>
+                    <span class="tooltip-value">{{ hoveredTripleData.count }}</span>
+                  </div>
+                </div>
               </div>
             </div>
           </div>
@@ -404,6 +440,14 @@ const volumeSeriesVisibility = ref({
   duration: true,
 })
 
+const tripleSeriesVisibility = ref({
+  avg: true,
+  total: true,
+  count: true,
+})
+
+const hoveredTripleIndex = ref(null)
+
 // Modal pour créer une nouvelle séance
 const isCreateModalOpen = ref(false)
 const isCreatingSession = ref(false)
@@ -428,6 +472,50 @@ function toggleVolumeSeries(seriesKey) {
 const weeklyVisibleSeriesCount = computed(() =>
   Math.max(1, Object.values(volumeSeriesVisibility.value).filter(Boolean).length)
 )
+
+function toggleTripleSeries(seriesKey) {
+  const visibility = tripleSeriesVisibility.value
+  const activeCount = Object.values(visibility).filter(Boolean).length
+  if (visibility[seriesKey] && activeCount <= 1) return
+
+  tripleSeriesVisibility.value = {
+    ...visibility,
+    [seriesKey]: !visibility[seriesKey],
+  }
+}
+
+function handleTripleGraphMouseMove(event) {
+  const svg = event.currentTarget
+  const rect = svg.getBoundingClientRect()
+  const x = event.clientX - rect.left
+  const percentage = x / rect.width
+  const index = Math.round(percentage * (chartBuckets.value.length - 1))
+  hoveredTripleIndex.value = Math.max(0, Math.min(index, chartBuckets.value.length - 1))
+}
+
+function handleTripleGraphMouseLeave() {
+  hoveredTripleIndex.value = null
+}
+
+const hoveredTripleData = computed(() => {
+  if (hoveredTripleIndex.value === null) return null
+  const bucket = chartBuckets.value[hoveredTripleIndex.value]
+  if (!bucket) return null
+  
+  const avgValue = durationSeries.value[hoveredTripleIndex.value] || 0
+  const totalValue = tripleTotalSeries.value[hoveredTripleIndex.value] || 0
+  const countValue = tripleCountSeries.value[hoveredTripleIndex.value] || 0
+  
+  return {
+    label: bucket.label,
+    start: bucket.start,
+    end: bucket.end,
+    avg: avgValue,
+    total: totalValue,
+    count: countValue,
+    x: Math.round((hoveredTripleIndex.value / (chartBuckets.value.length - 1 || 1)) * 260)
+  }
+})
 
 function openCreateModal() {
   const now = new Date()
@@ -949,6 +1037,91 @@ const durationScaleLabels = computed(() => {
   return [durationMax.value, Math.round(durationMax.value / 2), 0]
 })
 
+// Triple series - Average duration, Total duration (normalized), Session count (normalized)
+const tripleTotalSeries = computed(() => {
+  return chartBuckets.value.map(bucket => {
+    const sessions = chartSessions.value.filter(session => {
+      const t = session.startedAt?.getTime?.()
+      return t && t >= bucket.start.getTime() && t < bucket.end.getTime()
+    })
+    const total = sessions.reduce((sum, session) => sum + (session.durationMinutes || 0), 0)
+    return Math.round(total)
+  })
+})
+
+const tripleCountSeries = computed(() => {
+  return chartBuckets.value.map(bucket => {
+    const sessions = chartSessions.value.filter(session => {
+      const t = session.startedAt?.getTime?.()
+      return t && t >= bucket.start.getTime() && t < bucket.end.getTime()
+    })
+    return sessions.length
+  })
+})
+
+const tripleDurationMax = computed(() => {
+  const avgMax = Math.max(...durationSeries.value, 0)
+  const totalMax = Math.max(...tripleTotalSeries.value, 0) * 1.5
+  const countMax = Math.max(...tripleCountSeries.value, 1)
+  // Normalize on same scale - convert count to equivalent minutes (scale count × 50)
+  return Math.max(avgMax, totalMax, countMax * 50, 1)
+})
+
+// Independent max for each series for proper scaling
+const tripleAvgMax = computed(() => {
+  return Math.max(...durationSeries.value, 1) * 1.2
+})
+
+const tripleTotalMax = computed(() => {
+  return Math.max(...tripleTotalSeries.value, 1)
+})
+
+const tripleCountMax = computed(() => {
+  return Math.max(...tripleCountSeries.value, 1) * 60
+})
+
+// SVG points for Average Duration series
+const triplePointsMetaAvg = computed(() => {
+  const values = durationSeries.value
+  const max = tripleAvgMax.value
+  return values.map((value, index) => {
+    const x = Math.round((index / (values.length - 1 || 1)) * 260)
+    const y = 65 - Math.round((value / max) * 45)
+    return { x, y }
+  })
+})
+
+const triplePointsAvg = computed(() => triplePointsMetaAvg.value.map(p => `${p.x},${p.y}`).join(' '))
+const tripleAreaPointsAvg = computed(() => `${triplePointsAvg.value} 260,80 0,80`)
+
+// SVG points for Total Duration series
+const triplePointsMetaTotal = computed(() => {
+  const values = tripleTotalSeries.value.map(v => v * 1.5) // Scale for visibility
+  const max = tripleTotalMax.value
+  return values.map((value, index) => {
+    const x = Math.round((index / (values.length - 1 || 1)) * 260)
+    const y = 65 - Math.round((value / max) * 45)
+    return { x, y }
+  })
+})
+
+const triplePointsTotal = computed(() => triplePointsMetaTotal.value.map(p => `${p.x},${p.y}`).join(' '))
+const tripleAreaPointsTotal = computed(() => `${triplePointsTotal.value} 260,80 0,80`)
+
+// SVG points for Session Count series (scaled for visibility)
+const triplePointsMetaCount = computed(() => {
+  const values = tripleCountSeries.value.map(v => v * 60) // Scale for visibility
+  const max = tripleCountMax.value
+  return values.map((value, index) => {
+    const x = Math.round((index / (values.length - 1 || 1)) * 260)
+    const y = 65 - Math.round((value / max) * 45)
+    return { x, y }
+  })
+})
+
+const triplePointsCount = computed(() => triplePointsMetaCount.value.map(p => `${p.x},${p.y}`).join(' '))
+const tripleAreaPointsCount = computed(() => `${triplePointsCount.value} 260,80 0,80`)
+
 const linePointsMeta = computed(() => {
   const values = durationSeries.value
   const max = Math.max(...values, 1)
@@ -963,6 +1136,18 @@ const linePoints = computed(() => linePointsMeta.value.map(p => `${p.x},${p.y}`)
 const lineAreaPoints = computed(() => `${linePoints.value} 260,80 0,80`)
 
 const typeDistribution = computed(() => buildTypeDistribution(chartSessions.value))
+
+const weeklySessionCount = computed(() => {
+  const now = new Date()
+  const weekStart = startOfWeekMonday(now)
+  const weekEnd = new Date(weekStart)
+  weekEnd.setDate(weekEnd.getDate() + 7)
+  
+  return chartSessions.value.filter(session => {
+    const t = session.startedAt?.getTime?.()
+    return t && t >= weekStart.getTime() && t < weekEnd.getTime()
+  }).length
+})
 
 const donutSegments = computed(() => {
   const radius = 30
@@ -1392,7 +1577,19 @@ watch(() => authStore.user?.uid, (uid, _oldUid, onCleanup) => {
 .legend-chip.reps { color: #60a5fa; border-color: rgba(96, 165, 250, 0.38); }
 .legend-chip.duration { color: #a78bfa; border-color: rgba(167, 139, 250, 0.38); }
 
+.chart-legend-triple {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+
+.legend-chip.avg { color: #baf2d8; border-color: rgba(186, 242, 216, 0.38); }
+.legend-chip.total { color: #60a5fa; border-color: rgba(96, 165, 250, 0.38); }
+.legend-chip.count { color: #fb923c; border-color: rgba(251, 146, 60, 0.38); }
+
 .chart-shell { display: grid; grid-template-columns: 34px 1fr; gap: 8px; align-items: end; }
+.chart-shell.triple-no-labels { grid-template-columns: 1fr; }
 .chart-y-labels {
   height: 128px;
   display: flex;
@@ -1494,7 +1691,7 @@ watch(() => authStore.user?.uid, (uid, _oldUid, onCleanup) => {
 .bar-label { font-size: 0.58rem; color: var(--text-3); }
 
 .line-chart { position: relative; height: 128px; }
-.line-chart svg { width: 100%; height: 100%; overflow: visible; }
+.line-chart svg { width: 100%; height: 100%; overflow: visible; cursor: crosshair; }
 
 .svg-grid-line {
   stroke: rgba(186, 242, 216, 0.14);
@@ -1521,6 +1718,66 @@ watch(() => authStore.user?.uid, (uid, _oldUid, onCleanup) => {
   font-size: 0.6rem;
   color: var(--text-3);
 }
+
+.hover-indicator-line {
+  stroke: rgba(186, 242, 216, 0.42);
+  stroke-width: 1.5;
+  pointer-events: none;
+}
+
+.triple-hover-tooltip {
+  position: absolute;
+  top: 8px;
+  left: 50%;
+  transform: translateX(-50%);
+  background: rgba(20, 20, 20, 0.95);
+  border: 1px solid rgba(186, 242, 216, 0.3);
+  border-radius: 8px;
+  padding: 10px 12px;
+  backdrop-filter: blur(8px);
+  z-index: 10;
+  white-space: nowrap;
+  font-size: 0.7rem;
+  pointer-events: none;
+}
+
+.tooltip-label {
+  font-weight: 600;
+  color: var(--secondary);
+  margin-bottom: 6px;
+  font-size: 0.68rem;
+}
+
+.tooltip-values {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.tooltip-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 0.65rem;
+}
+
+.tooltip-name {
+  color: var(--text-3);
+}
+
+.tooltip-value {
+  font-weight: 600;
+  color: var(--text-1);
+}
+
+.tooltip-row.avg .tooltip-name { color: rgba(186, 242, 216, 0.7); }
+.tooltip-row.avg .tooltip-value { color: #baf2d8; }
+
+.tooltip-row.total .tooltip-name { color: rgba(96, 165, 250, 0.7); }
+.tooltip-row.total .tooltip-value { color: #60a5fa; }
+
+.tooltip-row.count .tooltip-name { color: rgba(251, 146, 60, 0.7); }
+.tooltip-row.count .tooltip-value { color: #fb923c; }
 
 .donut-wrap { display: flex; align-items: center; gap: 20px; margin-top: 8px; }
 .donut-legend { display: flex; flex-direction: column; gap: 8px; flex: 1; }
